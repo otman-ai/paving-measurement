@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paving-measurement"
+version = "0.1.0"
+description = "Satellite-image asphalt segmentation and approximate area measurement."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gradio>=5.0",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "Pillow>=10.0",
+    "requests>=2.31",
+    "torch>=2.5",
+    "transformers>=4.57",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
