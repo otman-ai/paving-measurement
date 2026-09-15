@@ -6,7 +6,19 @@ The reported area is a Web Mercator approximation. It is useful for exploratory 
 
 ## Demo
 
-![Paving measurement demo](assets/demo-1.png)
+### Before segmentation
+
+![Satellite image before segmentation](assets/before.jpg)
+
+### After segmentation
+
+![Satellite image with asphalt segmentation mask](assets/asphalt-segmentation-result.png)
+
+## Analysis
+
+The application presents the final unified asphalt mask and a comparison of outputs from each grid size. The grid strategy helps identify pavement at different feature scales.
+
+![Paving measurement analysis view](assets/demo-1.png)
 
 ## Project layout
 
