@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 class ConfigurationError(ValueError):
     """Raised when required configuration is absent or invalid."""

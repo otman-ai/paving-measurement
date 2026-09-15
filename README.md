@@ -14,6 +14,18 @@ The reported area is a Web Mercator approximation. It is useful for exploratory 
 
 ![Satellite image with asphalt segmentation mask](assets/asphalt-segmentation-result.png)
 
+### Parking lot prompt
+
+The same workflow can use `parking lot` as the segmentation prompt.
+
+#### Before segmentation
+
+![Parking lot satellite image before segmentation](assets/original_parking_lot.webp)
+
+#### After segmentation
+
+![Parking lot segmentation result](assets/after_parking_lot.webp)
+
 ## Analysis
 
 The application presents the final unified asphalt mask and a comparison of outputs from each grid size. The grid strategy helps identify pavement at different feature scales.
