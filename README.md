@@ -20,6 +20,12 @@ The application presents the final unified asphalt mask and a comparison of outp
 
 ![Paving measurement analysis view](assets/demo-1.png)
 
+### Auto-labeling potential
+
+This workflow can also accelerate creation of training data for a future customer-specific pavement model. SAM 3 masks can be exported as candidate labels for satellite images, allowing reviewers to correct only inaccurate boundaries instead of annotating every pavement area from scratch. The reviewed masks can then form a higher-quality, customer-specific dataset for training and evaluating a dedicated model.
+
+Use auto-generated masks as a labeling aid, not as ground truth: retain the source imagery, record reviewer corrections, and define consistent labeling rules before model training.
+
 ## Project layout
 
 ```text
