@@ -6,8 +6,6 @@ The reported area is a Web Mercator approximation. It is useful for exploratory 
 
 ## Demo
 
-After `assets/demo-1.png` is uploaded, it is displayed below as an example of the application output.
-
 ![Paving measurement demo](assets/demo-1.png)
 
 ## Project layout
