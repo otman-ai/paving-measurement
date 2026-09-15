@@ -4,6 +4,12 @@ A Gradio application that retrieves a 3x3 Mapbox satellite-image mosaic, uses SA
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
+## Demo
+
+After `assets/demo-1.png` is uploaded, it is displayed below as an example of the application output.
+
+![Paving measurement demo](assets/demo-1.png)
+
 ## Project layout
 
 ```text
@@ -15,6 +21,7 @@ src/paving_measurement/
   mapbox.py         Mapbox API client
   segmentation.py   SAM 3 inference and multi-grid pipeline
 notebooks/          repeatable experiments
+assets/             README images and other lightweight static assets
 tests/              focused unit tests
 ```
 
