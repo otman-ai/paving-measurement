@@ -18,7 +18,11 @@ secrets = modal.Secret.from_name(
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.11")
     .apt_install("libgl1", "libglib2.0-0")
-    .pip_install("torch==2.5.1", index_url="https://download.pytorch.org/whl/cu124")
+    .pip_install(
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        index_url="https://download.pytorch.org/whl/cu124",
+    )
     .pip_install(
         "fastapi>=0.115",
         "matplotlib>=3.8",
