@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
 from paving_measurement.config import Settings, load_settings
@@ -24,6 +25,7 @@ class AnalyzeRequest(BaseModel):
     latitude: float | None = Field(default=None, ge=-85.05112878, le=85.05112878)
     longitude: float | None = Field(default=None, ge=-180, le=180)
     zoom: int | None = None
+    prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -58,13 +60,14 @@ def _resolve_location(request: AnalyzeRequest, client: MapboxClient) -> tuple[fl
 def create_api() -> FastAPI:
     """Create an API whose lifespan loads the model exactly once per worker."""
 
+    configured_settings = load_settings()
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        settings = load_settings()
         application.state.services = Services(
-            settings=settings,
-            client=MapboxClient(settings.mapbox_token, settings.request_timeout_seconds),
-            segmenter=Sam3Segmenter(settings),
+            settings=configured_settings,
+            client=MapboxClient(configured_settings.mapbox_token, configured_settings.request_timeout_seconds),
+            segmenter=Sam3Segmenter(configured_settings),
         )
         yield
 
@@ -73,6 +76,14 @@ def create_api() -> FastAPI:
         version="0.1.0",
         description="Satellite-image pavement segmentation and approximate area measurement.",
         lifespan=lifespan,
+    )
+    cors_origins = [origin.strip() for origin in configured_settings.cors_origins.split(",") if origin.strip()]
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     @api.get("/health")
@@ -101,7 +112,8 @@ def create_api() -> FastAPI:
             if not services.settings.min_zoom <= zoom <= services.settings.max_zoom:
                 raise ValueError(f"Zoom must be between {services.settings.min_zoom} and {services.settings.max_zoom}.")
             satellite_image = get_satellite_image(services.client, latitude, longitude, zoom)
-            result = services.segmenter.run(satellite_image, latitude, zoom)
+            prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
+            result = services.segmenter.run(satellite_image, latitude, zoom, prompts)
             return {
                 "latitude": latitude,
                 "longitude": longitude,
@@ -111,6 +123,10 @@ def create_api() -> FastAPI:
                 "satellite_image": _as_data_url(satellite_image, "JPEG"),
                 "final_overlay": _as_data_url(result.final_overlay),
                 "comparison": _as_data_url(result.comparison),
+                "polygons": result.polygons,
+                "meters_per_pixel": result.meters_per_pixel,
+                "area_m2": result.area_m2,
+                "area_ft2": result.area_ft2,
             }
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error

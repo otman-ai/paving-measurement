@@ -27,6 +27,7 @@ image = (
         "fastapi>=0.115",
         "matplotlib>=3.8",
         "numpy>=1.26",
+        "opencv-python-headless>=4.10",
         "Pillow>=10.0",
         "python-dotenv>=1.0",
         "requests>=2.31",

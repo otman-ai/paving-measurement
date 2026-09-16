@@ -7,6 +7,8 @@ __pycache__/
 .ipynb_checkpoints/
 runs/
 outputs/
+result.json
+results.json
 data/
 *.pt
 *.pth

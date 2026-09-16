@@ -27,6 +27,7 @@ class Settings:
     default_zoom: int = 18
     host: str = "0.0.0.0"
     port: int = 7860
+    cors_origins: str = "*"
     request_timeout_seconds: int = 30
     grid_sizes: tuple[int, ...] = tuple(range(1, 8))
     segmentation_threshold: float = 0.5
@@ -66,4 +67,5 @@ def load_settings() -> Settings:
         default_zoom=_integer("DEFAULT_ZOOM", 18),
         host=os.getenv("HOST", "0.0.0.0"),
         port=_integer("PORT", 7860),
+        cors_origins=os.getenv("CORS_ORIGINS", "*"),
     )

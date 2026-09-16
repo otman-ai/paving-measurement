@@ -124,7 +124,7 @@ For a CPU-only deployment, replace the `Dockerfile` base image with an appropria
 
 ## Modal deployment with FastAPI
 
-`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A10G GPU, loads SAM 3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads.
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A10G GPU, loads SAM 3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. Each `/v1/analyze` request can provide a dynamic comma-separated `prompt`, for example `asphalt pavement, parking lot`.
 
 Install and authenticate the Modal CLI:
 
@@ -155,7 +155,9 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
   --data '{"address":"1600 Pennsylvania Avenue NW, Washington, DC", "zoom":18}'
 ```
 
-`POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
+`POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
+
+The separate [`frontend/`](frontend/README.md) project provides an address form and browser-side polygon editing. It recalculates square footage as vertices are moved or polygons are removed.
 
 Modal Web Functions have a 150-second request timeout before returning a redirect to the result URL; use `curl --location` or an HTTP client configured to follow redirects for longer segmentation requests. Keep the generated URL behind appropriate authentication or access controls before sharing it publicly.
 
@@ -181,4 +183,18 @@ jupyter lab
 ```bash
 pytest
 ruff check .
+```
+
+## View an API result locally
+
+Save the response from `/v1/analyze` as `result.json`, then run:
+
+```bash
+python test.py result.json
+```
+
+The script extracts the satellite image, final overlay, and grid comparison into `outputs/` and opens them together. In a headless environment, save them without opening a window:
+
+```bash
+python test.py result.json --no-show
 ```

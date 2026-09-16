@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import cv2
 from PIL import Image
 from transformers import Sam3Model, Sam3Processor
 
@@ -26,6 +27,10 @@ class PipelineResult:
     summary: str
     grid_rows: list[list[str | int]]
     grid_overlays: list[Image.Image]
+    polygons: list[list[list[int]]]
+    meters_per_pixel: float
+    area_m2: float
+    area_ft2: float
 
 
 class Sam3Segmenter:
@@ -39,9 +44,9 @@ class Sam3Segmenter:
         self.processor = Sam3Processor.from_pretrained(settings.model_id, token=settings.hf_token)
         self.model.eval()
 
-    def _run_batch(self, tiles: list[dict[str, object]]) -> list[dict[str, Any]]:
+    def _run_batch(self, tiles: list[dict[str, object]], prompt: str) -> list[dict[str, Any]]:
         images = [tile["image"] for tile in tiles]
-        inputs = self.processor(images=images, text=[self.settings.prompt] * len(images), return_tensors="pt")
+        inputs = self.processor(images=images, text=[prompt] * len(images), return_tensors="pt")
         with torch.inference_mode():
             outputs = self.model(**inputs.to(self.device))
         target_sizes = [(image.height, image.width) for image in images]
@@ -52,35 +57,47 @@ class Sam3Segmenter:
             target_sizes=target_sizes,
         )
 
-    def process_grid(self, original_image: Image.Image, grid_size: int) -> torch.Tensor:
+    def process_grid(
+        self, original_image: Image.Image, grid_size: int, prompts: list[str]
+    ) -> torch.Tensor:
         """Segment a grid and project every local mask into original-image coordinates."""
         image_width, image_height = original_image.size
         masks: list[torch.Tensor] = []
         tiles = create_grid_tiles(original_image, grid_size)
-        for start in range(0, len(tiles), self.settings.batch_size):
-            batch = tiles[start : start + self.settings.batch_size]
-            for tile, result in zip(batch, self._run_batch(batch)):
-                result_masks = result.get("masks")
-                if result_masks is None:
-                    continue
-                for local_mask in result_masks:
-                    local_mask = local_mask.bool().cpu()
-                    full_mask = torch.zeros((image_height, image_width), dtype=torch.bool)
-                    x, y = int(tile["x"]), int(tile["y"])
-                    height, width = local_mask.shape
-                    full_mask[y : y + height, x : x + width] = local_mask
-                    masks.append(full_mask)
+        for prompt in prompts:
+            for start in range(0, len(tiles), self.settings.batch_size):
+                batch = tiles[start : start + self.settings.batch_size]
+                for tile, result in zip(batch, self._run_batch(batch, prompt)):
+                    result_masks = result.get("masks")
+                    if result_masks is None:
+                        continue
+                    for local_mask in result_masks:
+                        local_mask = local_mask.bool().cpu()
+                        full_mask = torch.zeros((image_height, image_width), dtype=torch.bool)
+                        x, y = int(tile["x"]), int(tile["y"])
+                        height, width = local_mask.shape
+                        full_mask[y : y + height, x : x + width] = local_mask
+                        masks.append(full_mask)
         return torch.stack(masks) if masks else torch.empty((0, image_height, image_width), dtype=torch.bool)
 
-    def run(self, satellite_image: Image.Image, latitude: float, zoom: int) -> PipelineResult:
+    def run(
+        self,
+        satellite_image: Image.Image,
+        latitude: float,
+        zoom: int,
+        prompts: list[str] | None = None,
+    ) -> PipelineResult:
         """Run all configured grid sizes and calculate approximate asphalt area."""
         start = time.perf_counter()
         original = satellite_image.convert("RGB")
+        prompt_values = [prompt.strip() for prompt in (prompts or [self.settings.prompt]) if prompt.strip()]
+        if not prompt_values:
+            raise ValueError("At least one segmentation prompt is required.")
         all_masks: list[torch.Tensor] = []
         rows: list[list[str | int]] = []
         overlays: list[Image.Image] = []
         for grid_size in self.settings.grid_sizes:
-            masks = self.process_grid(original, grid_size)
+            masks = self.process_grid(original, grid_size, prompt_values)
             if len(masks):
                 all_masks.extend(masks)
                 union = torch.any(masks, dim=0)
@@ -94,7 +111,19 @@ class Sam3Segmenter:
         pixels = int(final_mask.sum().item())
         resolution, area_m2, area_ft2 = calculate_area(pixels, latitude, zoom)
         total_tiles = sum(size**2 for size in self.settings.grid_sizes)
-        total_batches = sum(math.ceil(size**2 / self.settings.batch_size) for size in self.settings.grid_sizes)
+        total_batches = len(prompt_values) * sum(
+            math.ceil(size**2 / self.settings.batch_size) for size in self.settings.grid_sizes
+        )
+        mask_np = final_mask.numpy().astype("uint8")
+        contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        polygons = []
+        for contour in contours:
+            if cv2.contourArea(contour) < 4:
+                continue
+            simplified = cv2.approxPolyDP(contour, 1.5, True)
+            points = [[int(point[0][0]), int(point[0][1])] for point in simplified]
+            if len(points) >= 3:
+                polygons.append(points)
         summary = f"""# Asphalt Segmentation Results
 
 ## Location
@@ -104,7 +133,7 @@ Zoom: `{zoom}`
 
 ## Processing
 
-Prompt: `{self.settings.prompt}`  
+Prompts: `{", ".join(prompt_values)}`
 Grid strategy: `1x1` through `7x7`  
 Image tiles analyzed: `{total_tiles}`  
 Model batches: `{total_batches}`  
@@ -119,4 +148,14 @@ Area: `{area_m2:,.2f} m²` (`{area_ft2:,.2f} ft²`)
 
 Area is an approximate Web Mercator estimate, not a survey-grade measurement.
 """
-        return PipelineResult(overlay_masks(original, final_mask).convert("RGB"), create_comparison(overlays), summary, rows, overlays)
+        return PipelineResult(
+            overlay_masks(original, final_mask).convert("RGB"),
+            create_comparison(overlays),
+            summary,
+            rows,
+            overlays,
+            polygons,
+            resolution,
+            area_m2,
+            area_ft2,
+        )
