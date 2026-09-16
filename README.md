@@ -1,6 +1,6 @@
 # Paving Measurement
 
-A Gradio application that retrieves a 3x3 Mapbox satellite-image mosaic, uses SAM 3 to segment asphalt pavement, and estimates the covered area. It evaluates multiple grid sizes (1x1 through 7x7) to capture features at different scales.
+A pavement-analysis service with a local Gradio interface and a FastAPI deployment target. It retrieves a 3x3 Mapbox satellite-image mosaic, uses SAM 3 to segment pavement, and estimates the covered area. It evaluates multiple grid sizes (1x1 through 7x7) to capture features at different scales.
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
@@ -42,12 +42,15 @@ Use auto-generated masks as a labeling aid, not as ground truth: retain the sour
 
 ```text
 src/paving_measurement/
+  api.py            FastAPI endpoints for programmatic analysis
   app.py            Gradio UI and application entry point
   config.py         validated environment-based settings
   geospatial.py     tile coordinates and area calculations
   image_ops.py      image tiling, overlays, and comparisons
   mapbox.py         Mapbox API client
   segmentation.py   SAM 3 inference and multi-grid pipeline
+  satellite.py      Mapbox satellite mosaic service
+modal_app.py        Modal GPU deployment definition for FastAPI
 notebooks/          repeatable experiments
 assets/             README images and other lightweight static assets
 tests/              focused unit tests
@@ -79,12 +82,9 @@ Create your local environment file and populate the tokens. Do not commit this f
 cp .env.example .env
 ```
 
-Load the variables and start the application:
+Start the local Gradio application. It automatically loads values from `.env`:
 
 ```bash
-set -a
-source .env
-set +a
 python -m paving_measurement.app
 ```
 
@@ -121,6 +121,43 @@ docker run --rm --gpus all --env-file .env -p 7860:7860 paving-measurement
 ```
 
 For a CPU-only deployment, replace the `Dockerfile` base image with an appropriate CPU PyTorch image and remove `gpus: all` from `docker-compose.yml`. Expect substantially longer inference time.
+
+## Modal deployment with FastAPI
+
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A10G GPU, loads SAM 3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads.
+
+Install and authenticate the Modal CLI:
+
+```bash
+python -m pip install "modal>=1.0"
+modal setup
+```
+
+Create the Modal secret from your existing local `.env`. The file remains local and is excluded from Git.
+
+```bash
+modal secret create paving-measurement-secrets --from-dotenv .env
+```
+
+Deploy the API:
+
+```bash
+modal deploy modal_app.py
+```
+
+The deploy command prints the HTTPS API URL. Use that URL in the following request; FastAPI's interactive OpenAPI documentation is available at `/docs`.
+
+```bash
+export MODAL_API_URL="https://your-workspace--paving-measurement-api.modal.run"
+
+curl --location --request POST "$MODAL_API_URL/v1/analyze" \
+  --header "Content-Type: application/json" \
+  --data '{"address":"1600 Pennsylvania Avenue NW, Washington, DC", "zoom":18}'
+```
+
+`POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
+
+Modal Web Functions have a 150-second request timeout before returning a redirect to the result URL; use `curl --location` or an HTTP client configured to follow redirects for longer segmentation requests. Keep the generated URL behind appropriate authentication or access controls before sharing it publicly.
 
 ## Deployment notes
 

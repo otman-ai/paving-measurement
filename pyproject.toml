@@ -9,6 +9,7 @@ description = "Satellite-image asphalt segmentation and approximate area measure
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.115",
     "gradio>=5.0",
     "matplotlib>=3.8",
     "numpy>=1.26",
@@ -21,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.8"]
+modal = ["modal>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
