@@ -9,13 +9,16 @@ import math
 from io import BytesIO
 from typing import Any
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
 from paving_measurement.config import Settings, load_settings
+from paving_measurement.geospatial import latlon_to_tile
 from paving_measurement.mapbox import MapboxClient
-from paving_measurement.parking_detection import pixel_to_longitude_latitude, point_in_polygon, validate_polygon
+from paving_measurement.parking_detection import pixel_to_longitude_latitude, validate_polygon
 from paving_measurement.satellite import get_satellite_image, get_satellite_mosaic_for_polygons
 from paving_measurement.segmentation import Sam3Segmenter
 
@@ -78,6 +81,45 @@ def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
         )
         / 2.0
     )
+
+
+def _clip_contours_to_input(
+    contours: list[list[list[int]]],
+    input_polygons: list[list[tuple[float, float]]],
+    mosaic_origin: tuple[int, int],
+    zoom: int,
+    image_size: tuple[int, int],
+) -> list[list[list[int]]]:
+    """Clip SAM contours to the drawn geographic regions before returning them."""
+    width, height = image_size
+    input_mask = np.zeros((height, width), dtype=np.uint8)
+    origin_x, origin_y = mosaic_origin
+    for polygon in input_polygons:
+        points = [
+            [
+                round(tile_x * 256 - origin_x * 256),
+                round(tile_y * 256 - origin_y * 256),
+            ]
+            for longitude, latitude in polygon
+            for tile_x, tile_y in [latlon_to_tile(latitude, longitude, zoom)]
+        ]
+        cv2.fillPoly(input_mask, [np.asarray(points, dtype=np.int32)], 1)
+
+    clipped: list[list[list[int]]] = []
+    for contour in contours:
+        contour_mask = np.zeros((height, width), dtype=np.uint8)
+        points = np.asarray(contour, dtype=np.int32)
+        cv2.fillPoly(contour_mask, [points], 1)
+        intersection = cv2.bitwise_and(contour_mask, input_mask)
+        clipped_contours, _ = cv2.findContours(intersection, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for clipped_contour in clipped_contours:
+            if cv2.contourArea(clipped_contour) < 4:
+                continue
+            simplified = cv2.approxPolyDP(clipped_contour, 1.5, True)
+            clipped_points = [[int(point[0][0]), int(point[0][1])] for point in simplified]
+            if len(clipped_points) >= 3:
+                clipped.append(clipped_points)
+    return clipped
 
 
 def _as_data_url(image: Any, image_format: str = "PNG") -> str:
@@ -183,7 +225,14 @@ def create_api() -> FastAPI:
             )
             result = services.segmenter.run(mosaic.image, latitude, request.zoom, prompts)
             geographic_polygons: list[list[list[float]]] = []
-            for pixel_polygon in result.polygons:
+            clipped_pixel_polygons = _clip_contours_to_input(
+                result.polygons,
+                selected_polygons,
+                (mosaic.min_tile_x, mosaic.min_tile_y),
+                request.zoom,
+                mosaic.image.size,
+            )
+            for pixel_polygon in clipped_pixel_polygons:
                 coordinates = [
                     list(
                         pixel_to_longitude_latitude(
@@ -192,12 +241,7 @@ def create_api() -> FastAPI:
                     )
                     for pixel_x, pixel_y in pixel_polygon
                 ]
-                if any(
-                    point_in_polygon(longitude, latitude_value, selection)
-                    for longitude, latitude_value in coordinates
-                    for selection in selected_polygons
-                ):
-                    geographic_polygons.append(coordinates)
+                geographic_polygons.append(coordinates)
             area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
                 "zoom": request.zoom,
