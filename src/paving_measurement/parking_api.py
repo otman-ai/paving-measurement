@@ -15,6 +15,7 @@ from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import ParkingStallDetector, validate_polygon
 
 PARKING_MODEL_ID = "otmanheddouch/yolov8n-09-19-2026"
+PARKING_INFERENCE_ZOOM = 20
 
 
 class ParkingDetectionRequest(BaseModel):
@@ -25,7 +26,7 @@ class ParkingDetectionRequest(BaseModel):
         description="One or more polygon rings; every position is [longitude, latitude].",
         examples=[[[[-77.0366, 38.8975], [-77.0359, 38.8975], [-77.0359, 38.8971]]]],
     )
-    zoom: int = Field(default=20, ge=16, le=22)
+    zoom: int | None = Field(default=None, description="Deprecated; parking inference always uses fixed zoom 20.")
     confidence: float = Field(default=0.25, gt=0, lt=1)
     max_tiles: int = Field(default=400, ge=1, le=900)
     imgsz: int = Field(default=1280, ge=256, le=1536)
@@ -82,7 +83,7 @@ def create_parking_api() -> FastAPI:
             polygons = [validate_polygon(polygon) for polygon in request.polygons]
             spots, tile_count = services.detector.detect(
                 polygons=polygons,
-                zoom=request.zoom,
+                zoom=PARKING_INFERENCE_ZOOM,
                 confidence=request.confidence,
                 max_tiles=request.max_tiles,
                 imgsz=request.imgsz,
@@ -92,7 +93,7 @@ def create_parking_api() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {
             "model_id": PARKING_MODEL_ID,
-            "zoom": request.zoom,
+            "zoom": PARKING_INFERENCE_ZOOM,
             "tile_count": tile_count,
             "spots": [spot.as_dict() for spot in spots],
         }

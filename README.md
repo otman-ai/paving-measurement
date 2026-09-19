@@ -160,7 +160,7 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
-`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. A request is limited to nine source tiles at zoom 16–20 to keep the serverless SAM3 job bounded; draw a smaller area or lower the zoom when that limit is exceeded.
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3 at fixed inference zoom 20, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. A request is limited to nine source tiles at zoom 20 to keep the serverless SAM3 job bounded; draw a smaller area when that limit is exceeded. The map's visual zoom is not used for model quality.
 
 The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, SAM3 object editing, stall dots, and real-world quantity summaries.
 
@@ -171,12 +171,11 @@ The map workflow uses `POST /v1/analyze-polygon`:
 ```json
 {
   "polygons": [[[-77.0366, 38.8975], [-77.0359, 38.8975], [-77.0359, 38.8971]]],
-  "zoom": 20,
   "prompt": "asphalt pavement, parking lot"
 }
 ```
 
-The service validates the ring, calculates the inclusive Mapbox tile rectangle around its vertices, downloads that rectangle, and keeps the minimum tile X/Y as the image origin. Mapbox tiles are 256x256 RGB images. SAM3 receives the resulting mosaic and runs the configured 1x1 through 7x7 grid strategy; each grid tile is batched according to `BATCH_SIZE`, masks are projected back into mosaic pixels, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and zoom.
+The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, downloads that rectangle, and keeps the minimum tile X/Y as the image origin. Mapbox tiles are 256x256 RGB images. SAM3 receives the resulting mosaic and runs the configured 1x1 through 7x7 grid strategy; each grid tile is batched according to `BATCH_SIZE`, masks are projected back into mosaic pixels, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and fixed zoom.
 
 Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded mosaic. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser.
 
@@ -184,7 +183,6 @@ Response shape:
 
 ```json
 {
-  "zoom": 20,
   "tile_count": 4,
   "polygons": [[[-77.0364, 38.8974], [-77.0362, 38.8974], [-77.0362, 38.8972]]],
   "meters_per_pixel": 0.11,
@@ -204,7 +202,7 @@ The older `POST /v1/analyze` route accepts an address or centre coordinate and r
 ```text
 Frontend polygon: [[longitude, latitude], ...]
         |
-        +--> Mapbox tile bounds at requested Web Mercator zoom
+        +--> Mapbox tile bounds at fixed inference zoom 20
         |
         +--> download every 256x256 satellite tile in the bounds
         |
@@ -221,7 +219,7 @@ Frontend polygon: [[longitude, latitude], ...]
 
 The important distinction is that the API does not send one large satellite image to YOLO. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections from the overlap are merged by geographic distance.
 
-`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at the requested zoom, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
+`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
 
 It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
 
@@ -237,7 +235,6 @@ export PARKING_API_URL="https://your-workspace--parking-stall-detection-api.moda
 curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
   --header "Content-Type: application/json" \
   --data '{
-    "zoom": 20,
     "polygons": [[
       [-77.0366, 38.8975],
       [-77.0359, 38.8975],
@@ -247,7 +244,7 @@ curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
   }'
 ```
 
-The default request limit is 400 source tiles. For an even larger site, split the drawn region into multiple polygons or lower the zoom; the API returns a clear 400 error rather than starting an unbounded GPU job. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`.
+The default request limit is 400 source tiles at fixed inference zoom 20. For an even larger site, split the drawn region into multiple polygons; the API returns a clear 400 error rather than silently lowering image quality. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`. A legacy `zoom` field is accepted for compatibility but ignored.
 
 ### Parking request and response contract
 
@@ -284,8 +281,8 @@ Polygon = [[longitude, latitude], [longitude, latitude], ...]
 It sends the same ring to both models:
 
 ```text
-Frontend -> SAM3:     { polygons: [inputPolygon], zoom, prompt }
-Frontend -> Parking:  { polygons: [inputPolygon], zoom }
+Frontend -> SAM3:     { polygons: [inputPolygon], prompt }
+Frontend -> Parking:  { polygons: [inputPolygon] }
 ```
 
 SAM3 returns `polygons[]`, where each item is a detected geographic object contour. Parking returns `spots[]`, where each item contains a centre `coordinates` pair. The browser passes those coordinates directly to MapLibre GeoJSON sources; it does not convert them to screen pixels. Pixel conversion exists only inside the backend while matching model outputs to satellite tiles.

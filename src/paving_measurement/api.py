@@ -22,6 +22,8 @@ from paving_measurement.parking_detection import pixel_to_longitude_latitude, va
 from paving_measurement.satellite import get_satellite_image, get_satellite_mosaic_for_polygons
 from paving_measurement.segmentation import Sam3Segmenter
 
+SAM_INFERENCE_ZOOM = 20
+
 
 class AnalyzeRequest(BaseModel):
     """Location input. An address takes precedence over coordinates."""
@@ -48,7 +50,7 @@ class AnalyzePolygonRequest(BaseModel):
         min_length=1,
         description="One or more polygon rings; each position is [longitude, latitude].",
     )
-    zoom: int = Field(default=20, ge=16, le=20)
+    zoom: int | None = Field(default=None, description="Deprecated; SAM3 always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     max_tiles: int = Field(default=9, ge=1, le=9)
 
@@ -187,9 +189,7 @@ def create_api() -> FastAPI:
         services: Services = api.state.services
         try:
             latitude, longitude = _resolve_location(request, services.client)
-            zoom = request.zoom or services.settings.default_zoom
-            if not services.settings.min_zoom <= zoom <= services.settings.max_zoom:
-                raise ValueError(f"Zoom must be between {services.settings.min_zoom} and {services.settings.max_zoom}.")
+            zoom = SAM_INFERENCE_ZOOM
             satellite_image = get_satellite_image(services.client, latitude, longitude, zoom)
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
             result = services.segmenter.run(satellite_image, latitude, zoom, prompts)
@@ -217,26 +217,26 @@ def create_api() -> FastAPI:
         try:
             selected_polygons = [validate_polygon(polygon) for polygon in request.polygons]
             mosaic = get_satellite_mosaic_for_polygons(
-                services.client, selected_polygons, request.zoom, request.max_tiles
+                services.client, selected_polygons, SAM_INFERENCE_ZOOM, request.max_tiles
             )
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
             latitude = sum(latitude for polygon in selected_polygons for _, latitude in polygon) / sum(
                 len(polygon) for polygon in selected_polygons
             )
-            result = services.segmenter.run(mosaic.image, latitude, request.zoom, prompts)
+            result = services.segmenter.run(mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts)
             geographic_polygons: list[list[list[float]]] = []
             clipped_pixel_polygons = _clip_contours_to_input(
                 result.polygons,
                 selected_polygons,
                 (mosaic.min_tile_x, mosaic.min_tile_y),
-                request.zoom,
+                SAM_INFERENCE_ZOOM,
                 mosaic.image.size,
             )
             for pixel_polygon in clipped_pixel_polygons:
                 coordinates = [
                     list(
                         pixel_to_longitude_latitude(
-                            mosaic.min_tile_x, mosaic.min_tile_y, pixel_x, pixel_y, request.zoom
+                            mosaic.min_tile_x, mosaic.min_tile_y, pixel_x, pixel_y, SAM_INFERENCE_ZOOM
                         )
                     )
                     for pixel_x, pixel_y in pixel_polygon
@@ -244,7 +244,7 @@ def create_api() -> FastAPI:
                 geographic_polygons.append(coordinates)
             area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
-                "zoom": request.zoom,
+                "zoom": SAM_INFERENCE_ZOOM,
                 "tile_count": mosaic.tile_count,
                 "summary": result.summary,
                 "grid_results": result.grid_rows,
