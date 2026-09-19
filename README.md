@@ -51,6 +51,7 @@ src/paving_measurement/
   segmentation.py   SAM 3 inference and multi-grid pipeline
   satellite.py      Mapbox satellite mosaic service
 modal_app.py        Modal GPU deployment definition for FastAPI
+parking_modal_app.py Modal GPU deployment for tiled parking-stall detection
 notebooks/          repeatable experiments
 assets/             README images and other lightweight static assets
 tests/              focused unit tests
@@ -157,7 +158,39 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. A request is limited to nine source tiles at zoom 16–20 to keep the serverless SAM3 job bounded; draw a smaller area or lower the zoom when that limit is exceeded.
+
 The separate [`frontend/`](frontend/README.md) project provides an address form and browser-side polygon editing. It recalculates square footage as vertices are moved or polygons are removed.
+
+## Parking-stall detection on Modal
+
+`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads the satellite tiles covering those rings at the requested zoom, and runs YOLO on overlapping 3-by-3 tile mosaics. This preserves imagery detail for large areas while preventing misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
+
+It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
+
+```bash
+modal deploy parking_modal_app.py
+```
+
+Then call its `POST /v1/detect-parking-stalls` endpoint. The response's `spots[].coordinates` is directly usable as a map marker position; it is `[longitude, latitude]`, never a bounding box.
+
+```bash
+export PARKING_API_URL="https://your-workspace--parking-stall-detection-api.modal.run"
+
+curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "zoom": 20,
+    "polygons": [[
+      [-77.0366, 38.8975],
+      [-77.0359, 38.8975],
+      [-77.0359, 38.8971],
+      [-77.0366, 38.8971]
+    ]]
+  }'
+```
+
+The default request limit is 144 source tiles. For a larger site, split the drawn region into multiple polygons or lower the zoom; the API returns a clear 400 error rather than starting an unbounded GPU job. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`.
 
 Modal Web Functions have a 150-second request timeout before returning a redirect to the result URL; use `curl --location` or an HTTP client configured to follow redirects for longer segmentation requests. Keep the generated URL behind appropriate authentication or access controls before sharing it publicly.
 

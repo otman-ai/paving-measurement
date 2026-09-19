@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from paving_measurement.config import Settings, load_settings
 from paving_measurement.mapbox import MapboxClient
-from paving_measurement.satellite import get_satellite_image
+from paving_measurement.parking_detection import pixel_to_longitude_latitude, point_in_polygon, validate_polygon
+from paving_measurement.satellite import get_satellite_image, get_satellite_mosaic_for_polygons
 from paving_measurement.segmentation import Sam3Segmenter
 
 
@@ -33,6 +34,24 @@ class AnalyzeRequest(BaseModel):
             return self
         if self.latitude is None or self.longitude is None:
             raise ValueError("Provide an address or both latitude and longitude.")
+        return self
+
+
+class AnalyzePolygonRequest(BaseModel):
+    """User-drawn map regions for SAM3 analysis, in GeoJSON coordinate order."""
+
+    polygons: list[list[list[float]]] = Field(
+        min_length=1,
+        description="One or more polygon rings; each position is [longitude, latitude].",
+    )
+    zoom: int = Field(default=20, ge=16, le=20)
+    prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
+    max_tiles: int = Field(default=9, ge=1, le=9)
+
+    @model_validator(mode="after")
+    def has_valid_polygons(self) -> "AnalyzePolygonRequest":
+        for polygon in self.polygons:
+            validate_polygon(polygon)
         return self
 
 
@@ -77,10 +96,10 @@ def create_api() -> FastAPI:
         description="Satellite-image pavement segmentation and approximate area measurement.",
         lifespan=lifespan,
     )
-    cors_origins = [origin.strip() for origin in configured_settings.cors_origins.split(",") if origin.strip()]
+    # cors_origins = [origin.strip() for origin in configured_settings.cors_origins.split(",") if origin.strip()]
     api.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins or ["*"],
+        allow_origins=["https://paving-measurement-frontend.vercel.app"],
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -124,6 +143,49 @@ def create_api() -> FastAPI:
                 "final_overlay": _as_data_url(result.final_overlay),
                 "comparison": _as_data_url(result.comparison),
                 "polygons": result.polygons,
+                "meters_per_pixel": result.meters_per_pixel,
+                "area_m2": result.area_m2,
+                "area_ft2": result.area_ft2,
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @api.post("/v1/analyze-polygon")
+    def analyze_polygon(request: AnalyzePolygonRequest) -> dict[str, Any]:
+        """Segment only the map region drawn by the user and return geographic contours."""
+        services: Services = api.state.services
+        try:
+            selected_polygons = [validate_polygon(polygon) for polygon in request.polygons]
+            mosaic = get_satellite_mosaic_for_polygons(
+                services.client, selected_polygons, request.zoom, request.max_tiles
+            )
+            prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
+            latitude = sum(latitude for polygon in selected_polygons for _, latitude in polygon) / sum(
+                len(polygon) for polygon in selected_polygons
+            )
+            result = services.segmenter.run(mosaic.image, latitude, request.zoom, prompts)
+            geographic_polygons: list[list[list[float]]] = []
+            for pixel_polygon in result.polygons:
+                coordinates = [
+                    list(
+                        pixel_to_longitude_latitude(
+                            mosaic.min_tile_x, mosaic.min_tile_y, pixel_x, pixel_y, request.zoom
+                        )
+                    )
+                    for pixel_x, pixel_y in pixel_polygon
+                ]
+                if any(
+                    point_in_polygon(longitude, latitude_value, selection)
+                    for longitude, latitude_value in coordinates
+                    for selection in selected_polygons
+                ):
+                    geographic_polygons.append(coordinates)
+            return {
+                "zoom": request.zoom,
+                "tile_count": mosaic.tile_count,
+                "summary": result.summary,
+                "grid_results": result.grid_rows,
+                "polygons": geographic_polygons,
                 "meters_per_pixel": result.meters_per_pixel,
                 "area_m2": result.area_m2,
                 "area_ft2": result.area_ft2,

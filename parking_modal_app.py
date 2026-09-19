@@ -1,12 +1,13 @@
-"""Modal deployment definition for the FastAPI pavement-analysis service.
+"""Modal deployment definition for tiled parking-stall detection.
 
-Deploy with: modal deploy modal_app.py
+Deploy with: modal deploy parking_modal_app.py
 """
 
 import modal
 
-APP_NAME = "paving-measurement"
-GPU_TYPE = "A100"
+APP_NAME = "parking-stall-detection"
+# YOLOv8n fits comfortably in the T4's 16 GB VRAM; this is Modal's lowest-cost GPU.
+GPU_TYPE = "T4"
 MODEL_CACHE_PATH = "/cache/huggingface"
 
 app = modal.App(APP_NAME)
@@ -25,13 +26,12 @@ image = (
     )
     .pip_install(
         "fastapi>=0.115",
-        "matplotlib>=3.8",
+        "huggingface_hub>=0.26",
         "numpy>=1.26",
         "opencv-python-headless>=4.10",
         "Pillow>=10.0",
-        "python-dotenv>=1.0",
         "requests>=2.31",
-        "transformers>=4.57",
+        "ultralytics>=8.3",
     )
     .add_local_dir("src", remote_path="/root/src", copy=True)
     .env({"PYTHONPATH": "/root/src", "HF_HOME": MODEL_CACHE_PATH})
@@ -46,10 +46,10 @@ image = (
     timeout=60 * 60,
     scaledown_window=5 * 60,
 )
-@modal.concurrent(max_inputs=3)
-@modal.asgi_app(label="api")
+@modal.concurrent(max_inputs=1)
+@modal.asgi_app(label="parking-api")
 def fastapi_app():
-    """Expose the FastAPI application on a Modal-managed HTTPS endpoint."""
-    from paving_measurement.api import create_api
+    """Expose parking-stall centre detection on a Modal HTTPS endpoint."""
+    from paving_measurement.parking_api import create_parking_api
 
-    return create_api()
+    return create_parking_api()

@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PIL import Image
 
 from paving_measurement.geospatial import latlon_to_tile
 from paving_measurement.mapbox import MapboxClient
+from paving_measurement.parking_detection import tile_range_for_polygons
+
+
+@dataclass(frozen=True)
+class TileMosaic:
+    """A Mapbox tile mosaic together with the origin needed to georeference pixels."""
+
+    image: Image.Image
+    min_tile_x: int
+    min_tile_y: int
+    tile_count: int
 
 
 def get_satellite_image(
@@ -21,3 +34,25 @@ def get_satellite_image(
             tile = client.download_tile(center_x + x_offset, center_y + y_offset, zoom)
             mosaic.paste(tile, ((x_offset + 1) * tile_size, (y_offset + 1) * tile_size))
     return mosaic
+
+
+def get_satellite_mosaic_for_polygons(
+    client: MapboxClient,
+    polygons: list[list[tuple[float, float]]],
+    zoom: int,
+    max_tiles: int = 9,
+) -> TileMosaic:
+    """Download the exact tile rectangle containing drawn GeoJSON polygon rings."""
+    min_x, max_x, min_y, max_y = tile_range_for_polygons(polygons, zoom)
+    tile_count = (max_x - min_x + 1) * (max_y - min_y + 1)
+    if tile_count > max_tiles:
+        raise ValueError(
+            f"Polygon covers {tile_count} tiles at zoom {zoom}; SAM3 analysis is limited to {max_tiles}. "
+            "Draw a smaller area or use a lower zoom."
+        )
+    width, height = max_x - min_x + 1, max_y - min_y + 1
+    mosaic = Image.new("RGB", (width * 256, height * 256))
+    for tile_y in range(min_y, max_y + 1):
+        for tile_x in range(min_x, max_x + 1):
+            mosaic.paste(client.download_tile(tile_x, tile_y, zoom), ((tile_x - min_x) * 256, (tile_y - min_y) * 256))
+    return TileMosaic(mosaic, min_x, min_y, tile_count)
