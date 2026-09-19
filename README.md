@@ -1,6 +1,6 @@
 # Paving Measurement
 
-A pavement-analysis service with a local Gradio interface and a FastAPI deployment target. It retrieves a 3x3 Mapbox satellite-image mosaic, uses SAM 3 to segment pavement, and estimates the covered area. It evaluates multiple grid sizes (1x1 through 7x7) to capture features at different scales.
+A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes a SAM3 segmentation API and an independent YOLO parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
@@ -49,6 +49,8 @@ src/paving_measurement/
   image_ops.py      image tiling, overlays, and comparisons
   mapbox.py         Mapbox API client
   segmentation.py   SAM 3 inference and multi-grid pipeline
+  parking_api.py     FastAPI parking-stall endpoint
+  parking_detection.py tile windows, coordinate projection, and deduplication
   satellite.py      Mapbox satellite mosaic service
 modal_app.py        Modal GPU deployment definition for FastAPI
 parking_modal_app.py Modal GPU deployment for tiled parking-stall detection
@@ -125,7 +127,7 @@ For a CPU-only deployment, replace the `Dockerfile` base image with an appropria
 
 ## Modal deployment with FastAPI
 
-`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A10G GPU, loads SAM 3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. Each `/v1/analyze` request can provide a dynamic comma-separated `prompt`, for example `asphalt pavement, parking lot`.
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A100 GPU, loads SAM3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. Each `/v1/analyze` request can provide a dynamic comma-separated `prompt`, for example `asphalt pavement, parking lot`.
 
 Install and authenticate the Modal CLI:
 
@@ -160,9 +162,64 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. A request is limited to nine source tiles at zoom 16–20 to keep the serverless SAM3 job bounded; draw a smaller area or lower the zoom when that limit is exceeded.
 
-The separate [`frontend/`](frontend/README.md) project provides an address form and browser-side polygon editing. It recalculates square footage as vertices are moved or polygons are removed.
+The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, SAM3 object editing, stall dots, and real-world quantity summaries.
+
+## SAM3 polygon analysis
+
+The map workflow uses `POST /v1/analyze-polygon`:
+
+```json
+{
+  "polygons": [[[-77.0366, 38.8975], [-77.0359, 38.8975], [-77.0359, 38.8971]]],
+  "zoom": 20,
+  "prompt": "asphalt pavement, parking lot"
+}
+```
+
+The service validates the ring, calculates the inclusive Mapbox tile rectangle around its vertices, downloads that rectangle, and keeps the minimum tile X/Y as the image origin. Mapbox tiles are 256x256 RGB images. SAM3 receives the resulting mosaic and runs the configured 1x1 through 7x7 grid strategy; each grid tile is batched according to `BATCH_SIZE`, masks are projected back into mosaic pixels, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and zoom.
+
+Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded mosaic. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser.
+
+Response shape:
+
+```json
+{
+  "zoom": 20,
+  "tile_count": 4,
+  "polygons": [[[-77.0364, 38.8974], [-77.0362, 38.8974], [-77.0362, 38.8972]]],
+  "meters_per_pixel": 0.11,
+  "area_m2": 128.4,
+  "area_ft2": 1381.9,
+  "grid_results": [],
+  "summary": "..."
+}
+```
+
+The older `POST /v1/analyze` route accepts an address or centre coordinate and returns base64 raster images. The map frontend uses `/v1/analyze-polygon` because it needs geographic contours rather than an image-only result.
 
 ## Parking-stall detection on Modal
+
+### Service data flow
+
+```text
+Frontend polygon: [[longitude, latitude], ...]
+        |
+        +--> Mapbox tile bounds at requested Web Mercator zoom
+        |
+        +--> download every 256x256 satellite tile in the bounds
+        |
+        +--> overlapping 2x2 windows, one inference at a time
+        |
+        +--> upscale window to 1280px, run YOLO checkpoint
+        |
+        +--> box centre -> tile pixel -> [longitude, latitude]
+        |
+        +--> polygon filter -> two-metre confidence deduplication
+        |
+        `--> spots[] returned to frontend as yellow map points
+```
+
+The important distinction is that the API does not send one large satellite image to YOLO. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections from the overlap are merged by geographic distance.
 
 `parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at the requested zoom, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
 
@@ -192,7 +249,48 @@ curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
 
 The default request limit is 400 source tiles. For an even larger site, split the drawn region into multiple polygons or lower the zoom; the API returns a clear 400 error rather than starting an unbounded GPU job. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`.
 
+### Parking request and response contract
+
+Request fields:
+
+| Field | Default | Meaning |
+| --- | ---: | --- |
+| `polygons` | required | Rings of `[longitude, latitude]` positions |
+| `zoom` | `20` | Mapbox/Web Mercator imagery zoom |
+| `confidence` | `0.25` | YOLO confidence threshold |
+| `max_tiles` | `400` | Maximum source tiles downloaded for one request |
+| `imgsz` | `1280` | Inference image size after window upscaling |
+| `duplicate_distance_meters` | `2.0` | Radius used to merge overlap detections |
+
+Response fields:
+
+| Field | Meaning |
+| --- | --- |
+| `tile_count` | Number of source Mapbox tiles downloaded |
+| `spots[].coordinates` | `[longitude, latitude]` centre for a detected stall |
+| `spots[].confidence` | YOLO confidence score |
+| `spots[].polygon_index` | Submitted polygon containing the centre |
+
 Modal Web Functions have a 150-second request timeout before returning a redirect to the result URL; use `curl --location` or an HTTP client configured to follow redirects for longer segmentation requests. Keep the generated URL behind appropriate authentication or access controls before sharing it publicly.
+
+## Data contract between frontend and services
+
+The frontend stores the user input as one or more rings:
+
+```text
+Polygon = [[longitude, latitude], [longitude, latitude], ...]
+```
+
+It sends the same ring to both models:
+
+```text
+Frontend -> SAM3:     { polygons: [inputPolygon], zoom, prompt }
+Frontend -> Parking:  { polygons: [inputPolygon], zoom }
+```
+
+SAM3 returns `polygons[]`, where each item is a detected geographic object contour. Parking returns `spots[]`, where each item contains a centre `coordinates` pair. The browser passes those coordinates directly to MapLibre GeoJSON sources; it does not convert them to screen pixels. Pixel conversion exists only inside the backend while matching model outputs to satellite tiles.
+
+The frontend maintains three independent visual layers: the cyan user input polygon, purple SAM3 object polygons, and yellow parking-stall centre points. Each can be hidden without deleting data. Input vertices and each SAM3 contour can be dragged, and the sidebar reports input area, SAM3 object area, and stall count separately.
 
 ## Deployment notes
 
