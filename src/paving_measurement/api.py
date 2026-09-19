@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import math
 from io import BytesIO
 from typing import Any
 
@@ -60,6 +61,23 @@ class Services:
     settings: Settings
     client: MapboxClient
     segmenter: Sam3Segmenter
+
+
+def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
+    """Approximate a longitude/latitude polygon's area in square metres."""
+    if len(polygon) < 3:
+        return 0.0
+    latitude = sum(point[1] for point in polygon) / len(polygon)
+    longitude_scale = 111_320.0 * math.cos(math.radians(latitude))
+    latitude_scale = 111_320.0
+    return abs(
+        sum(
+            polygon[index][0] * longitude_scale * polygon[(index + 1) % len(polygon)][1] * latitude_scale
+            - polygon[(index + 1) % len(polygon)][0] * longitude_scale * polygon[index][1] * latitude_scale
+            for index in range(len(polygon))
+        )
+        / 2.0
+    )
 
 
 def _as_data_url(image: Any, image_format: str = "PNG") -> str:
@@ -180,6 +198,7 @@ def create_api() -> FastAPI:
                     for selection in selected_polygons
                 ):
                     geographic_polygons.append(coordinates)
+            area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
                 "zoom": request.zoom,
                 "tile_count": mosaic.tile_count,
@@ -187,8 +206,8 @@ def create_api() -> FastAPI:
                 "grid_results": result.grid_rows,
                 "polygons": geographic_polygons,
                 "meters_per_pixel": result.meters_per_pixel,
-                "area_m2": result.area_m2,
-                "area_ft2": result.area_ft2,
+                "area_m2": area_m2,
+                "area_ft2": area_m2 * 10.7639,
             }
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
