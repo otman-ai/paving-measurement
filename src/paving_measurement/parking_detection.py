@@ -112,7 +112,7 @@ def deduplicate_spots(spots: Iterable[ParkingSpot], distance_meters: float) -> l
 class ParkingStallDetector:
     """Run YOLO on overlapping high-resolution Mapbox tile mosaics."""
 
-    def __init__(self, model: Any, client: MapboxClient, chunk_tiles: int = 3, overlap_tiles: int = 1) -> None:
+    def __init__(self, model: Any, client: MapboxClient, chunk_tiles: int = 2, overlap_tiles: int = 1) -> None:
         self.model = model
         self.client = client
         self.chunk_tiles = chunk_tiles
@@ -163,10 +163,25 @@ class ParkingStallDetector:
                     for offset_x in range(width):
                         mosaic.paste(tiles[(start_x + offset_x, start_y + offset_y)], (offset_x * TILE_SIZE, offset_y * TILE_SIZE))
 
-                result = self.model.predict(mosaic, imgsz=imgsz, conf=confidence, verbose=False)[0]
+                # Keep each source window small and upscale it before inference. A 2x2
+                # window at 1280px preserves stall detail better than shrinking a 3x3
+                # window to 640px. The inverse scale maps YOLO boxes back to tile pixels.
+                source_width, source_height = mosaic.size
+                scale = max(1.0, imgsz / max(source_width, source_height))
+                if scale != 1.0:
+                    inference_image = mosaic.resize(
+                        (round(source_width * scale), round(source_height * scale)), Image.Resampling.LANCZOS
+                    )
+                else:
+                    inference_image = mosaic
+                result = self.model.predict(inference_image, imgsz=imgsz, conf=confidence, verbose=False)[0]
                 for x1, y1, x2, y2, score, _class_id in result.boxes.data.tolist():
                     longitude, latitude = pixel_to_longitude_latitude(
-                        start_x, start_y, (x1 + x2) / 2, (y1 + y2) / 2, zoom
+                        start_x,
+                        start_y,
+                        (x1 + x2) / 2 / scale,
+                        (y1 + y2) / 2 / scale,
+                        zoom,
                     )
                     for polygon_index, polygon in enumerate(polygons):
                         if point_in_polygon(longitude, latitude, polygon):

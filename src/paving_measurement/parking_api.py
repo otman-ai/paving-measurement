@@ -27,8 +27,8 @@ class ParkingDetectionRequest(BaseModel):
     )
     zoom: int = Field(default=20, ge=16, le=22)
     confidence: float = Field(default=0.25, gt=0, lt=1)
-    max_tiles: int = Field(default=144, ge=1, le=400)
-    imgsz: int = Field(default=640, ge=256, le=1280)
+    max_tiles: int = Field(default=400, ge=1, le=900)
+    imgsz: int = Field(default=1280, ge=256, le=1536)
     duplicate_distance_meters: float = Field(default=2.0, gt=0, le=20)
 
     @field_validator("polygons")

@@ -164,7 +164,7 @@ The separate [`frontend/`](frontend/README.md) project provides an address form 
 
 ## Parking-stall detection on Modal
 
-`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads the satellite tiles covering those rings at the requested zoom, and runs YOLO on overlapping 3-by-3 tile mosaics. This preserves imagery detail for large areas while preventing misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
+`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at the requested zoom, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
 
 It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
 
@@ -190,7 +190,7 @@ curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
   }'
 ```
 
-The default request limit is 144 source tiles. For a larger site, split the drawn region into multiple polygons or lower the zoom; the API returns a clear 400 error rather than starting an unbounded GPU job. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`.
+The default request limit is 400 source tiles. For an even larger site, split the drawn region into multiple polygons or lower the zoom; the API returns a clear 400 error rather than starting an unbounded GPU job. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`.
 
 Modal Web Functions have a 150-second request timeout before returning a redirect to the result URL; use `curl --location` or an HTTP client configured to follow redirects for longer segmentation requests. Keep the generated URL behind appropriate authentication or access controls before sharing it publicly.
 

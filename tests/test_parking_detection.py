@@ -1,4 +1,5 @@
 import pytest
+from PIL import Image
 
 from paving_measurement.parking_detection import (
     ParkingSpot,
@@ -28,3 +29,30 @@ def test_overlapping_tile_detections_keep_best_confidence():
         [ParkingSpot(0, 0, 0.7, 0), ParkingSpot(0.000001, 0, 0.9, 0)], distance_meters=2
     )
     assert spots == [ParkingSpot(0.000001, 0, 0.9, 0)]
+
+
+def test_detector_upscales_small_windows_and_maps_boxes_back():
+    class FakeClient:
+        def download_tile(self, x: int, y: int, zoom: int) -> Image.Image:
+            return Image.new("RGB", (256, 256))
+
+    class FakeModel:
+        def __init__(self):
+            self.sizes = []
+
+        def predict(self, image, **kwargs):
+            self.sizes.append(image.size)
+            result = type("Result", (), {})()
+            result.boxes = type("Boxes", (), {"data": type("Data", (), {"tolist": lambda _self: [[300, 300, 340, 340, 0.9, 0]]})()})()
+            return [result]
+
+    from paving_measurement.parking_detection import ParkingStallDetector
+
+    model = FakeModel()
+    polygon = validate_polygon([[-1, -1], [1, -1], [1, 1], [-1, 1]])
+    spots, tile_count = ParkingStallDetector(model, FakeClient()).detect(
+        [polygon], zoom=2, confidence=0.25, max_tiles=10, imgsz=1280, duplicate_distance_meters=2
+    )
+    assert tile_count == 4
+    assert model.sizes[0] == (1280, 1280)
+    assert len(model.sizes) == 4
