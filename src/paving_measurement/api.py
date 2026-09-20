@@ -156,34 +156,6 @@ def _chunk_tile_bounds(
     return chunks
 
 
-def _deduplicate_geographic_polygons(polygons: list[list[list[float]]]) -> list[list[list[float]]]:
-    """Remove duplicate contours produced by overlapping imagery chunks."""
-    kept: list[list[list[float]]] = []
-    centroids: list[tuple[float, float]] = []
-    for polygon in polygons:
-        centroid = (
-            sum(point[0] for point in polygon) / len(polygon),
-            sum(point[1] for point in polygon) / len(polygon),
-        )
-        # At zoom 20, a five-metre radius is small enough to only collapse
-        # repeated contours from adjacent overlapping chunks.
-        duplicate = False
-        for previous in centroids:
-            latitude_scale = 111_320.0
-            longitude_scale = latitude_scale * math.cos(math.radians(centroid[1]))
-            distance = math.hypot(
-                (centroid[0] - previous[0]) * longitude_scale,
-                (centroid[1] - previous[1]) * latitude_scale,
-            )
-            if distance <= 5.0:
-                duplicate = True
-                break
-        if not duplicate:
-            kept.append(polygon)
-            centroids.append(centroid)
-    return kept
-
-
 def _resolve_location(request: AnalyzeRequest, client: MapboxClient) -> tuple[float, float]:
     if request.address and request.address.strip():
         return client.geocode_address(request.address)
@@ -279,7 +251,12 @@ def create_api() -> FastAPI:
             latitude = sum(latitude for polygon in selected_polygons for _, latitude in polygon) / sum(
                 len(polygon) for polygon in selected_polygons
             )
-            geographic_polygons: list[list[list[float]]] = []
+            # All chunk contours are rasterized into one shared mask. This is
+            # a true geometric union, so an object detected in two overlapping
+            # chunks cannot produce two translucent fills on the map.
+            full_width = (max_x - min_x + 1) * 256
+            full_height = (max_y - min_y + 1) * 256
+            union_mask = np.zeros((full_height, full_width), dtype=np.uint8)
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
             meters_per_pixel = 0.0
@@ -307,21 +284,39 @@ def create_api() -> FastAPI:
                     mosaic.image.size,
                 )
                 for pixel_polygon in clipped_pixel_polygons:
-                    geographic_polygons.append(
+                    global_points = np.asarray(
                         [
-                            list(
-                                pixel_to_longitude_latitude(
-                                    mosaic.min_tile_x,
-                                    mosaic.min_tile_y,
-                                    pixel_x,
-                                    pixel_y,
-                                    SAM_INFERENCE_ZOOM,
-                                )
-                            )
+                            [
+                                pixel_x + (mosaic.min_tile_x - min_x) * 256,
+                                pixel_y + (mosaic.min_tile_y - min_y) * 256,
+                            ]
                             for pixel_x, pixel_y in pixel_polygon
-                        ]
+                        ],
+                        dtype=np.int32,
                     )
-            geographic_polygons = _deduplicate_geographic_polygons(geographic_polygons)
+                    cv2.fillPoly(union_mask, [global_points], 1)
+            merged_contours, _ = cv2.findContours(union_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            geographic_polygons: list[list[list[float]]] = []
+            for contour in merged_contours:
+                if cv2.contourArea(contour) < 4:
+                    continue
+                simplified = cv2.approxPolyDP(contour, 1.5, True)
+                if len(simplified) < 3:
+                    continue
+                geographic_polygons.append(
+                    [
+                        list(
+                            pixel_to_longitude_latitude(
+                                min_x,
+                                min_y,
+                                int(point[0][0]),
+                                int(point[0][1]),
+                                SAM_INFERENCE_ZOOM,
+                            )
+                        )
+                        for point in simplified
+                    ]
+                )
             area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
                 "zoom": SAM_INFERENCE_ZOOM,
