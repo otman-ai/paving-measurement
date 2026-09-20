@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import ParkingStallDetector, validate_polygon
 
-PARKING_MODEL_ID = "otmanheddouch/yolov8n-09-19-2026"
+PARKING_MODEL_ID = "otmanheddouch/yolov26n-09-20-2026"
 PARKING_INFERENCE_ZOOM = 20
 
 
@@ -27,6 +27,7 @@ class ParkingDetectionRequest(BaseModel):
         examples=[[[[-77.0366, 38.8975], [-77.0359, 38.8975], [-77.0359, 38.8971]]]],
     )
     zoom: int | None = Field(default=None, description="Deprecated; parking inference always uses fixed zoom 20.")
+    processing_mode: Literal["tiled", "whole"] = Field(default="tiled", description="Use overlapping tile windows or one whole downloaded mosaic.")
     confidence: float = Field(default=0.25, gt=0, lt=1)
     max_tiles: int = Field(default=400, ge=1, le=900)
     imgsz: int = Field(default=1280, ge=256, le=1536)
@@ -88,12 +89,14 @@ def create_parking_api() -> FastAPI:
                 max_tiles=request.max_tiles,
                 imgsz=request.imgsz,
                 duplicate_distance_meters=request.duplicate_distance_meters,
+                processing_mode=request.processing_mode,
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {
             "model_id": PARKING_MODEL_ID,
             "zoom": PARKING_INFERENCE_ZOOM,
+            "processing_mode": request.processing_mode,
             "tile_count": tile_count,
             "spots": [spot.as_dict() for spot in spots],
         }

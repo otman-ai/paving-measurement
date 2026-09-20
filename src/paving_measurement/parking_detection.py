@@ -138,6 +138,7 @@ class ParkingStallDetector:
         max_tiles: int,
         imgsz: int,
         duplicate_distance_meters: float,
+        processing_mode: str = "tiled",
     ) -> tuple[list[ParkingSpot], int]:
         min_x, max_x, min_y, max_y = tile_range_for_polygons(polygons, zoom)
         tile_total = (max_x - min_x + 1) * (max_y - min_y + 1)
@@ -152,12 +153,20 @@ class ParkingStallDetector:
             for y in range(min_y, max_y + 1)
             for x in range(min_x, max_x + 1)
         }
+        if processing_mode not in {"tiled", "whole"}:
+            raise ValueError("processing_mode must be 'tiled' or 'whole'.")
         step = max(1, self.chunk_tiles - self.overlap_tiles)
+        windows = (
+            [(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)]
+            if processing_mode == "whole"
+            else [
+                (start_x, start_y, min(self.chunk_tiles, max_x - start_x + 1), min(self.chunk_tiles, max_y - start_y + 1))
+                for start_y in range(min_y, max_y + 1, step)
+                for start_x in range(min_x, max_x + 1, step)
+            ]
+        )
         detections: list[ParkingSpot] = []
-        for start_y in range(min_y, max_y + 1, step):
-            for start_x in range(min_x, max_x + 1, step):
-                width = min(self.chunk_tiles, max_x - start_x + 1)
-                height = min(self.chunk_tiles, max_y - start_y + 1)
+        for start_x, start_y, width, height in windows:
                 mosaic = Image.new("RGB", (width * TILE_SIZE, height * TILE_SIZE))
                 for offset_y in range(height):
                     for offset_x in range(width):
@@ -174,7 +183,7 @@ class ParkingStallDetector:
                     )
                 else:
                     inference_image = mosaic
-                result = self.model.predict(inference_image, imgsz=imgsz, conf=confidence, verbose=False)[0]
+                result = self.model.predict(inference_image, imgsz=imgsz, conf=confidence, verbose=False, max_det=2000)[0]
                 for x1, y1, x2, y2, score, _class_id in result.boxes.data.tolist():
                     longitude, latitude = pixel_to_longitude_latitude(
                         start_x,

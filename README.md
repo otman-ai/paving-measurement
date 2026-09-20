@@ -219,7 +219,7 @@ Frontend polygon: [[longitude, latitude], ...]
 
 The important distinction is that the API does not send one large satellite image to YOLO. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections from the overlap are merged by geographic distance.
 
-`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov8n-09-19-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres.
+`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov26n-09-20-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres. The API also supports `processing_mode: "whole"` as a comparison mode: it downloads the complete tile mosaic and runs one inference over that image.
 
 It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
 
@@ -235,6 +235,7 @@ export PARKING_API_URL="https://your-workspace--parking-stall-detection-api.moda
 curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
   --header "Content-Type: application/json" \
   --data '{
+    "processing_mode": "tiled",
     "polygons": [[
       [-77.0366, 38.8975],
       [-77.0359, 38.8975],
@@ -253,7 +254,8 @@ Request fields:
 | Field | Default | Meaning |
 | --- | ---: | --- |
 | `polygons` | required | Rings of `[longitude, latitude]` positions |
-| `zoom` | `20` | Mapbox/Web Mercator imagery zoom |
+| `processing_mode` | `tiled` | `tiled` for overlapping windows or `whole` for one downloaded mosaic |
+| `zoom` | ignored | Deprecated; server always uses inference zoom 20 |
 | `confidence` | `0.25` | YOLO confidence threshold |
 | `max_tiles` | `400` | Maximum source tiles downloaded for one request |
 | `imgsz` | `1280` | Inference image size after window upscaling |
