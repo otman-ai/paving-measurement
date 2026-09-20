@@ -175,7 +175,7 @@ The map workflow uses `POST /v1/analyze-polygon`:
 }
 ```
 
-The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, downloads that rectangle, and keeps the minimum tile X/Y as the image origin. Mapbox tiles are 256x256 RGB images. SAM3 receives the resulting mosaic and runs the configured 1x1 through 7x7 grid strategy; each grid tile is batched according to `BATCH_SIZE`, masks are projected back into mosaic pixels, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and fixed zoom.
+The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, downloads that rectangle, and stitches the source tiles into one mosaic. Mapbox tiles are still required as the imagery transport, but the SAM3 model receives the whole mosaic in one `1x1` pass for this endpoint; it does not use the legacy 1x1-through-7x7 multi-grid strategy. Masks are projected back into mosaic pixels, clipped to the input polygon, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and fixed zoom.
 
 Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded mosaic. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser.
 

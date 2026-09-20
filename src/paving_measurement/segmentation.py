@@ -86,17 +86,19 @@ class Sam3Segmenter:
         latitude: float,
         zoom: int,
         prompts: list[str] | None = None,
+        grid_sizes: tuple[int, ...] | None = None,
     ) -> PipelineResult:
-        """Run all configured grid sizes and calculate approximate asphalt area."""
+        """Run configured grid sizes and calculate approximate asphalt area."""
         start = time.perf_counter()
         original = satellite_image.convert("RGB")
         prompt_values = [prompt.strip() for prompt in (prompts or [self.settings.prompt]) if prompt.strip()]
         if not prompt_values:
             raise ValueError("At least one segmentation prompt is required.")
+        selected_grid_sizes = grid_sizes or self.settings.grid_sizes
         all_masks: list[torch.Tensor] = []
         rows: list[list[str | int]] = []
         overlays: list[Image.Image] = []
-        for grid_size in self.settings.grid_sizes:
+        for grid_size in selected_grid_sizes:
             masks = self.process_grid(original, grid_size, prompt_values)
             if len(masks):
                 all_masks.extend(masks)
@@ -110,9 +112,9 @@ class Sam3Segmenter:
         final_mask = torch.any(torch.stack(all_masks), dim=0) if all_masks else torch.zeros(original.size[::-1], dtype=torch.bool)
         pixels = int(final_mask.sum().item())
         resolution, area_m2, area_ft2 = calculate_area(pixels, latitude, zoom)
-        total_tiles = sum(size**2 for size in self.settings.grid_sizes)
+        total_tiles = sum(size**2 for size in selected_grid_sizes)
         total_batches = len(prompt_values) * sum(
-            math.ceil(size**2 / self.settings.batch_size) for size in self.settings.grid_sizes
+            math.ceil(size**2 / self.settings.batch_size) for size in selected_grid_sizes
         )
         mask_np = final_mask.numpy().astype("uint8")
         contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -124,6 +126,7 @@ class Sam3Segmenter:
             points = [[int(point[0][0]), int(point[0][1])] for point in simplified]
             if len(points) >= 3:
                 polygons.append(points)
+        grid_description = ", ".join(f"{size}x{size}" for size in selected_grid_sizes)
         summary = f"""# Asphalt Segmentation Results
 
 ## Location
@@ -134,7 +137,7 @@ Zoom: `{zoom}`
 ## Processing
 
 Prompts: `{", ".join(prompt_values)}`
-Grid strategy: `1x1` through `7x7`  
+Grid strategy: `{grid_description}`
 Image tiles analyzed: `{total_tiles}`  
 Model batches: `{total_batches}`  
 Device: `{self.device}`  

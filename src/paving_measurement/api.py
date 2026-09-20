@@ -223,7 +223,9 @@ def create_api() -> FastAPI:
             latitude = sum(latitude for polygon in selected_polygons for _, latitude in polygon) / sum(
                 len(polygon) for polygon in selected_polygons
             )
-            result = services.segmenter.run(mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts)
+            result = services.segmenter.run(
+                mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts, grid_sizes=(1,)
+            )
             geographic_polygons: list[list[list[float]]] = []
             clipped_pixel_polygons = _clip_contours_to_input(
                 result.polygons,
@@ -246,6 +248,7 @@ def create_api() -> FastAPI:
             return {
                 "zoom": SAM_INFERENCE_ZOOM,
                 "tile_count": mosaic.tile_count,
+                "processing_mode": "whole",
                 "summary": result.summary,
                 "grid_results": result.grid_rows,
                 "polygons": geographic_polygons,
