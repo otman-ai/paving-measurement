@@ -50,9 +50,31 @@ def get_satellite_mosaic_for_polygons(
             f"Polygon covers {tile_count} tiles at zoom {zoom}; SAM3 analysis is limited to {max_tiles}. "
             "Draw a smaller area or use a lower zoom."
         )
-    width, height = max_x - min_x + 1, max_y - min_y + 1
+    return get_satellite_mosaic_for_tile_bounds(client, min_x, max_x, min_y, max_y, zoom)
+
+
+def get_satellite_mosaic_for_tile_bounds(
+    client: MapboxClient,
+    min_tile_x: int,
+    max_tile_x: int,
+    min_tile_y: int,
+    max_tile_y: int,
+    zoom: int,
+) -> TileMosaic:
+    """Download an inclusive tile rectangle without applying a size limit."""
+    if min_tile_x > max_tile_x or min_tile_y > max_tile_y:
+        raise ValueError("Tile bounds must describe a non-empty rectangle.")
+    width, height = max_tile_x - min_tile_x + 1, max_tile_y - min_tile_y + 1
     mosaic = Image.new("RGB", (width * 256, height * 256))
-    for tile_y in range(min_y, max_y + 1):
-        for tile_x in range(min_x, max_x + 1):
-            mosaic.paste(client.download_tile(tile_x, tile_y, zoom), ((tile_x - min_x) * 256, (tile_y - min_y) * 256))
-    return TileMosaic(mosaic, min_x, min_y, tile_count)
+    for tile_y in range(min_tile_y, max_tile_y + 1):
+        for tile_x in range(min_tile_x, max_tile_x + 1):
+            mosaic.paste(
+                client.download_tile(tile_x, tile_y, zoom),
+                ((tile_x - min_tile_x) * 256, (tile_y - min_tile_y) * 256),
+            )
+    return TileMosaic(
+        mosaic,
+        min_tile_x,
+        min_tile_y,
+        width * height,
+    )

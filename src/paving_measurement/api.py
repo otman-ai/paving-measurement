@@ -18,8 +18,11 @@ from pydantic import BaseModel, Field, model_validator
 from paving_measurement.config import Settings, load_settings
 from paving_measurement.geospatial import latlon_to_tile
 from paving_measurement.mapbox import MapboxClient
-from paving_measurement.parking_detection import pixel_to_longitude_latitude, validate_polygon
-from paving_measurement.satellite import get_satellite_image, get_satellite_mosaic_for_polygons
+from paving_measurement.parking_detection import pixel_to_longitude_latitude, tile_range_for_polygons, validate_polygon
+from paving_measurement.satellite import (
+    get_satellite_image,
+    get_satellite_mosaic_for_tile_bounds,
+)
 from paving_measurement.segmentation import Sam3Segmenter
 
 SAM_INFERENCE_ZOOM = 20
@@ -52,7 +55,8 @@ class AnalyzePolygonRequest(BaseModel):
     )
     zoom: int | None = Field(default=None, description="Deprecated; SAM3 always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
-    max_tiles: int = Field(default=9, ge=1, le=9)
+    max_tiles: int = Field(default=400, ge=1, le=900, description="Maximum source tiles across all chunks.")
+    tiles_per_chunk: int = Field(default=9, ge=1, le=9, description="Maximum source tiles in each whole-image SAM pass.")
 
     @model_validator(mode="after")
     def has_valid_polygons(self) -> "AnalyzePolygonRequest":
@@ -130,6 +134,54 @@ def _as_data_url(image: Any, image_format: str = "PNG") -> str:
     image.save(buffer, format=image_format)
     payload = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/{image_format.lower()};base64,{payload}"
+
+
+def _chunk_tile_bounds(
+    min_x: int, max_x: int, min_y: int, max_y: int, tiles_per_chunk: int
+) -> list[tuple[int, int, int, int]]:
+    """Split a tile rectangle into overlapping whole-image chunks."""
+    side = max(1, min(3, math.isqrt(tiles_per_chunk)))
+    step = max(1, side - 1)
+    chunks: list[tuple[int, int, int, int]] = []
+    for chunk_y in range(min_y, max_y + 1, step):
+        for chunk_x in range(min_x, max_x + 1, step):
+            chunks.append(
+                (
+                    chunk_x,
+                    min(max_x, chunk_x + side - 1),
+                    chunk_y,
+                    min(max_y, chunk_y + side - 1),
+                )
+            )
+    return chunks
+
+
+def _deduplicate_geographic_polygons(polygons: list[list[list[float]]]) -> list[list[list[float]]]:
+    """Remove duplicate contours produced by overlapping imagery chunks."""
+    kept: list[list[list[float]]] = []
+    centroids: list[tuple[float, float]] = []
+    for polygon in polygons:
+        centroid = (
+            sum(point[0] for point in polygon) / len(polygon),
+            sum(point[1] for point in polygon) / len(polygon),
+        )
+        # At zoom 20, a five-metre radius is small enough to only collapse
+        # repeated contours from adjacent overlapping chunks.
+        duplicate = False
+        for previous in centroids:
+            latitude_scale = 111_320.0
+            longitude_scale = latitude_scale * math.cos(math.radians(centroid[1]))
+            distance = math.hypot(
+                (centroid[0] - previous[0]) * longitude_scale,
+                (centroid[1] - previous[1]) * latitude_scale,
+            )
+            if distance <= 5.0:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(polygon)
+            centroids.append(centroid)
+    return kept
 
 
 def _resolve_location(request: AnalyzeRequest, client: MapboxClient) -> tuple[float, float]:
@@ -216,43 +268,71 @@ def create_api() -> FastAPI:
         services: Services = api.state.services
         try:
             selected_polygons = [validate_polygon(polygon) for polygon in request.polygons]
-            mosaic = get_satellite_mosaic_for_polygons(
-                services.client, selected_polygons, SAM_INFERENCE_ZOOM, request.max_tiles
-            )
+            min_x, max_x, min_y, max_y = tile_range_for_polygons(selected_polygons, SAM_INFERENCE_ZOOM)
+            tile_count = (max_x - min_x + 1) * (max_y - min_y + 1)
+            if tile_count > request.max_tiles:
+                raise ValueError(
+                    f"Polygon covers {tile_count} tiles at zoom {SAM_INFERENCE_ZOOM}, exceeding the request limit "
+                    f"of {request.max_tiles}. Increase max_tiles or draw a smaller area."
+                )
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
             latitude = sum(latitude for polygon in selected_polygons for _, latitude in polygon) / sum(
                 len(polygon) for polygon in selected_polygons
             )
-            result = services.segmenter.run(
-                mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts, grid_sizes=(1,)
-            )
             geographic_polygons: list[list[list[float]]] = []
-            clipped_pixel_polygons = _clip_contours_to_input(
-                result.polygons,
-                selected_polygons,
-                (mosaic.min_tile_x, mosaic.min_tile_y),
-                SAM_INFERENCE_ZOOM,
-                mosaic.image.size,
-            )
-            for pixel_polygon in clipped_pixel_polygons:
-                coordinates = [
-                    list(
-                        pixel_to_longitude_latitude(
-                            mosaic.min_tile_x, mosaic.min_tile_y, pixel_x, pixel_y, SAM_INFERENCE_ZOOM
-                        )
+            grid_rows: list[list[str | int]] = []
+            summaries: list[str] = []
+            meters_per_pixel = 0.0
+            chunks = _chunk_tile_bounds(min_x, max_x, min_y, max_y, request.tiles_per_chunk)
+            for chunk_min_x, chunk_max_x, chunk_min_y, chunk_max_y in chunks:
+                mosaic = get_satellite_mosaic_for_tile_bounds(
+                    services.client,
+                    chunk_min_x,
+                    chunk_max_x,
+                    chunk_min_y,
+                    chunk_max_y,
+                    SAM_INFERENCE_ZOOM,
+                )
+                result = services.segmenter.run(
+                    mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts, grid_sizes=(1,)
+                )
+                meters_per_pixel = result.meters_per_pixel
+                summaries.append(result.summary)
+                grid_rows.extend(result.grid_rows)
+                clipped_pixel_polygons = _clip_contours_to_input(
+                    result.polygons,
+                    selected_polygons,
+                    (mosaic.min_tile_x, mosaic.min_tile_y),
+                    SAM_INFERENCE_ZOOM,
+                    mosaic.image.size,
+                )
+                for pixel_polygon in clipped_pixel_polygons:
+                    geographic_polygons.append(
+                        [
+                            list(
+                                pixel_to_longitude_latitude(
+                                    mosaic.min_tile_x,
+                                    mosaic.min_tile_y,
+                                    pixel_x,
+                                    pixel_y,
+                                    SAM_INFERENCE_ZOOM,
+                                )
+                            )
+                            for pixel_x, pixel_y in pixel_polygon
+                        ]
                     )
-                    for pixel_x, pixel_y in pixel_polygon
-                ]
-                geographic_polygons.append(coordinates)
+            geographic_polygons = _deduplicate_geographic_polygons(geographic_polygons)
             area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
                 "zoom": SAM_INFERENCE_ZOOM,
-                "tile_count": mosaic.tile_count,
-                "processing_mode": "whole",
-                "summary": result.summary,
-                "grid_results": result.grid_rows,
+                "tile_count": tile_count,
+                "chunk_count": len(chunks),
+                "processing_mode": "whole_per_chunk",
+                "summary": f"Processed {len(chunks)} overlapping whole-image chunks at fixed zoom {SAM_INFERENCE_ZOOM}.\n\n"
+                + "\n\n".join(summaries),
+                "grid_results": grid_rows,
                 "polygons": geographic_polygons,
-                "meters_per_pixel": result.meters_per_pixel,
+                "meters_per_pixel": meters_per_pixel,
                 "area_m2": area_m2,
                 "area_ft2": area_m2 * 10.7639,
             }

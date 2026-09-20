@@ -160,7 +160,7 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
-`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3 at fixed inference zoom 20, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. A request is limited to nine source tiles at zoom 20 to keep the serverless SAM3 job bounded; draw a smaller area when that limit is exceeded. The map's visual zoom is not used for model quality.
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3 at fixed inference zoom 20, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. Large regions are automatically split into overlapping source-image chunks (up to nine Mapbox tiles per chunk); SAM3 still sees one whole image per pass, and overlapping results are deduplicated geographically. The map's visual zoom is not used for model quality.
 
 The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, SAM3 object editing, stall dots, and real-world quantity summaries.
 
@@ -175,15 +175,17 @@ The map workflow uses `POST /v1/analyze-polygon`:
 }
 ```
 
-The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, downloads that rectangle, and stitches the source tiles into one mosaic. Mapbox tiles are still required as the imagery transport, but the SAM3 model receives the whole mosaic in one `1x1` pass for this endpoint; it does not use the legacy 1x1-through-7x7 multi-grid strategy. Masks are projected back into mosaic pixels, clipped to the input polygon, and contours are extracted with OpenCV. Every contour point is then projected back to `[longitude, latitude]` using the saved tile origin and fixed zoom.
+The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, and splits that rectangle into overlapping chunks when necessary. Each chunk is stitched into one whole image and passed to SAM3 in one `1x1` pass; it does not use the legacy 1x1-through-7x7 multi-grid strategy. Masks are projected back into chunk pixels, clipped to the input polygon, and contours from overlapping chunks are deduplicated geographically. Every contour point is then projected back to `[longitude, latitude]` using its chunk tile origin and fixed zoom.
 
-Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded mosaic. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser.
+Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded imagery. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser. `tile_count` is the total source-tile count and `chunk_count` reports the number of whole-image SAM passes.
 
 Response shape:
 
 ```json
 {
   "tile_count": 4,
+  "chunk_count": 1,
+  "processing_mode": "whole_per_chunk",
   "polygons": [[[-77.0364, 38.8974], [-77.0362, 38.8974], [-77.0362, 38.8972]]],
   "meters_per_pixel": 0.11,
   "area_m2": 128.4,
@@ -245,7 +247,7 @@ curl --location --request POST "$PARKING_API_URL/v1/detect-parking-stalls" \
   }'
 ```
 
-The default request limit is 400 source tiles at fixed inference zoom 20. For an even larger site, split the drawn region into multiple polygons; the API returns a clear 400 error rather than silently lowering image quality. `confidence`, `imgsz`, `duplicate_distance_meters`, and `max_tiles` are optional request controls documented in `/docs`. A legacy `zoom` field is accepted for compatibility but ignored.
+The default request limit is 400 source tiles at fixed inference zoom 20. `tiles_per_chunk` defaults to nine and controls the maximum source tiles in each whole-image SAM pass. For an even larger site, split the drawn region into multiple polygons or increase `max_tiles` within the serverless resource budget. `max_tiles` and `tiles_per_chunk` are optional request controls documented in `/docs`; a legacy `zoom` field is accepted for compatibility but ignored.
 
 ### Parking request and response contract
 
