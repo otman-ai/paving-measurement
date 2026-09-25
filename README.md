@@ -212,7 +212,7 @@ Frontend polygon: [[longitude, latitude], ...]
         |
         +--> upscale window to 1280px, run YOLO checkpoint
         |
-        +--> box centre -> tile pixel -> [longitude, latitude]
+        +--> oriented box corners + centre -> tile pixels -> geographic coordinates
         |
         +--> polygon filter -> two-metre confidence deduplication
         |
@@ -221,7 +221,7 @@ Frontend polygon: [[longitude, latitude], ...]
 
 The important distinction is that the API does not send one large satellite image to YOLO. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections from the overlap are merged by geographic distance.
 
-`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face YOLO model `otmanheddouch/yolov26n-09-20-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then its centres are converted back to map coordinates. This preserves stall detail for large areas and reduces misses at tile borders. Only centres whose coordinates lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres. The API also supports `processing_mode: "whole"` as a comparison mode: it downloads the complete tile mosaic and runs one inference over that image.
+`parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face oriented-object-detection model `otmanheddouch/yolov8n-obb-09-25-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then each OBB's centre and four rotated corners are converted back to geographic coordinates. This preserves stall orientation and detail for large areas and reduces misses at tile borders. Only detections whose centres lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres. The API also supports `processing_mode: "whole"` as a comparison mode: it downloads the complete tile mosaic and runs one OBB inference over that image.
 
 It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
 
@@ -229,7 +229,7 @@ It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN`
 modal deploy parking_modal_app.py
 ```
 
-Then call its `POST /v1/detect-parking-stalls` endpoint. The response's `spots[].coordinates` is directly usable as a map marker position; it is `[longitude, latitude]`, never a bounding box.
+Then call its `POST /v1/detect-parking-stalls` endpoint. The response's `spots[].coordinates` is directly usable as a map marker position; each spot also includes `corners`, an ordered four-point oriented polygon in `[longitude, latitude]` order, plus `angle_degrees` and `class_id`.
 
 ```bash
 export PARKING_API_URL="https://your-workspace--parking-stall-detection-api.modal.run"
@@ -269,6 +269,9 @@ Response fields:
 | --- | --- |
 | `tile_count` | Number of source Mapbox tiles downloaded |
 | `spots[].coordinates` | `[longitude, latitude]` centre for a detected stall |
+| `spots[].corners` | Four geographic corners of the oriented stall box |
+| `spots[].angle_degrees` | OBB rotation angle from the model |
+| `spots[].class_id` | Detected class index |
 | `spots[].confidence` | YOLO confidence score |
 | `spots[].polygon_index` | Submitted polygon containing the centre |
 

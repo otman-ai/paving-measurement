@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -17,20 +17,26 @@ TILE_SIZE = 256
 
 @dataclass(frozen=True)
 class ParkingSpot:
-    """A detected stall centre in GeoJSON coordinate order."""
+    """A detected oriented stall box and its centre in GeoJSON order."""
 
     longitude: float
     latitude: float
     confidence: float
     polygon_index: int
+    corners: list[tuple[float, float]] = field(default_factory=list)
+    angle_degrees: float = 0.0
+    class_id: int = 0
 
-    def as_dict(self) -> dict[str, float | int | list[float]]:
+    def as_dict(self) -> dict[str, float | int | list[float] | list[list[float]]]:
         return {
             "coordinates": [self.longitude, self.latitude],
             "longitude": self.longitude,
             "latitude": self.latitude,
             "confidence": self.confidence,
             "polygon_index": self.polygon_index,
+            "corners": [[longitude, latitude] for longitude, latitude in self.corners],
+            "angle_degrees": self.angle_degrees,
+            "class_id": self.class_id,
         }
 
 
@@ -184,16 +190,43 @@ class ParkingStallDetector:
                 else:
                     inference_image = mosaic
                 result = self.model.predict(inference_image, imgsz=imgsz, conf=confidence, verbose=False, max_det=2000)[0]
-                for x1, y1, x2, y2, score, _class_id in result.boxes.data.tolist():
+                obb = getattr(result, "obb", None)
+                if obb is None or len(obb) == 0:
+                    continue
+                corners_array = obb.xyxyxyxy.cpu().numpy()
+                angles = obb.xywhr.cpu().numpy()[:, 4]
+                scores = obb.conf.cpu().numpy()
+                classes = obb.cls.cpu().numpy()
+                for corner_pixels, angle, score, class_id in zip(corners_array, angles, scores, classes):
+                    source_corners = [
+                        (float(point[0]) / scale, float(point[1]) / scale)
+                        for point in corner_pixels
+                    ]
+                    center_x = sum(point[0] for point in source_corners) / len(source_corners)
+                    center_y = sum(point[1] for point in source_corners) / len(source_corners)
                     longitude, latitude = pixel_to_longitude_latitude(
                         start_x,
                         start_y,
-                        (x1 + x2) / 2 / scale,
-                        (y1 + y2) / 2 / scale,
+                        center_x,
+                        center_y,
                         zoom,
                     )
+                    geographic_corners = [
+                        pixel_to_longitude_latitude(start_x, start_y, pixel_x, pixel_y, zoom)
+                        for pixel_x, pixel_y in source_corners
+                    ]
                     for polygon_index, polygon in enumerate(polygons):
                         if point_in_polygon(longitude, latitude, polygon):
-                            detections.append(ParkingSpot(longitude, latitude, float(score), polygon_index))
+                            detections.append(
+                                ParkingSpot(
+                                    longitude,
+                                    latitude,
+                                    float(score),
+                                    polygon_index,
+                                    geographic_corners,
+                                    math.degrees(float(angle)),
+                                    int(class_id),
+                                )
+                            )
                             break
         return deduplicate_spots(detections, duplicate_distance_meters), tile_total

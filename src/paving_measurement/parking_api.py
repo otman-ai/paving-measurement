@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import ParkingStallDetector, validate_polygon
 
-PARKING_MODEL_ID = "otmanheddouch/yolov26n-09-20-2026"
+PARKING_MODEL_ID = "otmanheddouch/yolov8n-obb-09-25-2026"
 PARKING_INFERENCE_ZOOM = 20
 
 
@@ -61,7 +61,7 @@ def create_parking_api() -> FastAPI:
     api = FastAPI(
         title="Parking Stall Detection API",
         version="0.1.0",
-        description="Runs a Hugging Face YOLO model on high-resolution satellite tiles and returns stall centres.",
+        description="Runs a Hugging Face YOLO oriented-bounding-box model on high-resolution satellite tiles and returns stall centres and corners.",
         lifespan=lifespan,
     )
     origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
