@@ -31,10 +31,15 @@ image = (
         "Pillow>=10.0",
         "python-dotenv>=1.0",
         "requests>=2.31",
-        "transformers>=4.57",
+        "huggingface_hub>=0.26",
+        "ultralytics>=8.3",
     )
     .add_local_dir("src", remote_path="/root/src", copy=True)
-    .env({"PYTHONPATH": "/root/src", "HF_HOME": MODEL_CACHE_PATH})
+    .env({
+        "PYTHONPATH": "/root/src",
+        "HF_HOME": MODEL_CACHE_PATH,
+        "MODEL_ID": "otmanheddouch/yolo26n-seg",
+    })
 )
 
 

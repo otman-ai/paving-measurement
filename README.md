@@ -1,6 +1,6 @@
 # Paving Measurement
 
-A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes a SAM3 segmentation API and an independent YOLO parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
+A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes a YOLO26 segmentation API and an independent YOLO oriented parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
@@ -101,7 +101,7 @@ The application reads all configuration from environment variables. `.env` is a 
 | --- | --- | --- | --- |
 | `HF_TOKEN` | Yes | — | Hugging Face token allowed to access SAM 3 |
 | `MAPBOX_TOKEN` | Yes | — | Mapbox access token |
-| `MODEL_ID` | No | `facebook/sam3` | Hugging Face model ID |
+| `MODEL_ID` | No | `otmanheddouch/yolo26n-seg` | Hugging Face YOLO segmentation model ID |
 | `SEGMENTATION_PROMPT` | No | `asphalt pavement` | Text prompt used for SAM 3 |
 | `BATCH_SIZE` | No | `8` | Images per inference batch; adjust for GPU memory |
 | `MIN_ZOOM` / `MAX_ZOOM` | No | `14` / `20` | Permitted Mapbox zoom range |
@@ -127,7 +127,7 @@ For a CPU-only deployment, replace the `Dockerfile` base image with an appropria
 
 ## Modal deployment with FastAPI
 
-`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A100 GPU, loads SAM3 once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. Each `/v1/analyze` request can provide a dynamic comma-separated `prompt`, for example `asphalt pavement, parking lot`.
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A100 GPU, loads the YOLO segmentation checkpoint `otmanheddouch/yolo26n-seg` once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. The segmentation model is class-driven and does not use text prompts; the legacy `prompt` field is accepted for request compatibility.
 
 Install and authenticate the Modal CLI:
 
@@ -160,11 +160,11 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
-`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs SAM3 at fixed inference zoom 20, and returns the detected object contours in the same geographic coordinate order for drawing directly on a web map. Large regions are automatically split into overlapping source-image chunks (up to nine Mapbox tiles per chunk); SAM3 still sees one whole image per pass, and overlapping results are deduplicated geographically. The map's visual zoom is not used for model quality.
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs YOLO26 segmentation at fixed inference zoom 20, and returns the detected mask contours in the same geographic coordinate order for drawing directly on a web map. Large regions are automatically split into overlapping source-image chunks (up to nine Mapbox tiles per chunk); YOLO receives one whole image per pass, and overlapping results are unioned geographically. The map's visual zoom is not used for model quality.
 
-The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, SAM3 object editing, stall dots, and real-world quantity summaries.
+The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, YOLO mask editing, oriented stall boxes, and real-world quantity summaries.
 
-## SAM3 polygon analysis
+## YOLO segmentation polygon analysis
 
 The map workflow uses `POST /v1/analyze-polygon`:
 
@@ -175,9 +175,9 @@ The map workflow uses `POST /v1/analyze-polygon`:
 }
 ```
 
-The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, and splits that rectangle into overlapping chunks when necessary. Each chunk is stitched into one whole image and passed to SAM3 in one `1x1` pass; it does not use the legacy 1x1-through-7x7 multi-grid strategy. Masks are projected back into chunk pixels, clipped to the input polygon, and all chunk contours are rasterized into one shared mask before final contour extraction. This geometric union prevents overlapping chunks from producing duplicate or double-shaded objects. Every contour point is then projected back to `[longitude, latitude]` using the shared tile origin and fixed zoom.
+The service validates the ring, uses fixed inference zoom 20 regardless of the map's visual zoom, calculates the inclusive Mapbox tile rectangle around the vertices, and splits that rectangle into overlapping chunks when necessary. Each chunk is stitched into one whole image and passed to `otmanheddouch/yolo26n-seg`. Ultralytics returns normalized mask polygons (`results.masks.xyn`); the service scales them to the chunk image, clips them to the input polygon, and rasterizes all chunk contours into one shared mask before final contour extraction. This geometric union prevents overlapping chunks from producing duplicate or double-shaded objects. Every contour point is then projected back to `[longitude, latitude]` using the shared tile origin and fixed zoom.
 
-Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded imagery. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser. `tile_count` is the total source-tile count and `chunk_count` reports the number of whole-image SAM passes.
+Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded imagery. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser. `tile_count` is the total source-tile count and `chunk_count` reports the number of whole-image YOLO passes.
 
 Response shape:
 
@@ -195,7 +195,7 @@ Response shape:
 }
 ```
 
-The older `POST /v1/analyze` route accepts an address or centre coordinate and returns base64 raster images. The map frontend uses `/v1/analyze-polygon` because it needs geographic contours rather than an image-only result.
+The older `POST /v1/analyze` route accepts an address or centre coordinate and runs one whole-image YOLO segmentation pass, returning base64 raster images and pixel contours. The map frontend uses `/v1/analyze-polygon` because it needs geographic contours rather than an image-only result.
 
 ## Parking-stall detection on Modal
 

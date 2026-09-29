@@ -19,7 +19,7 @@ class ConfigurationError(ValueError):
 class Settings:
     hf_token: str
     mapbox_token: str
-    model_id: str = "facebook/sam3"
+    model_id: str = "otmanheddouch/yolo26n-seg"
     prompt: str = "asphalt pavement"
     batch_size: int = 8
     min_zoom: int = 14
@@ -59,7 +59,7 @@ def load_settings() -> Settings:
     return Settings(
         hf_token=_required("HF_TOKEN"),
         mapbox_token=_required("MAPBOX_TOKEN"),
-        model_id=os.getenv("MODEL_ID", "facebook/sam3"),
+        model_id=os.getenv("MODEL_ID", "otmanheddouch/yolo26n-seg"),
         prompt=os.getenv("SEGMENTATION_PROMPT", "asphalt pavement"),
         batch_size=_integer("BATCH_SIZE", 8),
         min_zoom=_integer("MIN_ZOOM", 14),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import logging
 import math
 from io import BytesIO
 from typing import Any
@@ -16,16 +17,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
 from paving_measurement.config import Settings, load_settings
-from paving_measurement.geospatial import latlon_to_tile
+from paving_measurement.geospatial import latlon_to_tile, meters_per_pixel
 from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import pixel_to_longitude_latitude, tile_range_for_polygons, validate_polygon
 from paving_measurement.satellite import (
     get_satellite_image,
     get_satellite_mosaic_for_tile_bounds,
 )
-from paving_measurement.segmentation import Sam3Segmenter
+from paving_measurement.yolo_segmentation import YoloSegmentationDetector
 
-SAM_INFERENCE_ZOOM = 20
+SEGMENTATION_INFERENCE_ZOOM = 20
+SEGMENTATION_MODEL_ID = "otmanheddouch/yolo26n-seg"
+LOGGER = logging.getLogger(__name__)
 
 
 class AnalyzeRequest(BaseModel):
@@ -47,13 +50,13 @@ class AnalyzeRequest(BaseModel):
 
 
 class AnalyzePolygonRequest(BaseModel):
-    """User-drawn map regions for SAM3 analysis, in GeoJSON coordinate order."""
+    """User-drawn map regions for YOLO segmentation, in GeoJSON coordinate order."""
 
     polygons: list[list[list[float]]] = Field(
         min_length=1,
         description="One or more polygon rings; each position is [longitude, latitude].",
     )
-    zoom: int | None = Field(default=None, description="Deprecated; SAM3 always uses fixed inference zoom 20.")
+    zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     max_tiles: int = Field(default=400, ge=1, le=900, description="Maximum source tiles across all chunks.")
     tiles_per_chunk: int = Field(default=9, ge=1, le=9, description="Maximum source tiles in each whole-image SAM pass.")
@@ -69,7 +72,7 @@ class AnalyzePolygonRequest(BaseModel):
 class Services:
     settings: Settings
     client: MapboxClient
-    segmenter: Sam3Segmenter
+    segmenter: YoloSegmentationDetector
 
 
 def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
@@ -169,11 +172,17 @@ def create_api() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        application.state.services = Services(
-            settings=configured_settings,
-            client=MapboxClient(configured_settings.mapbox_token, configured_settings.request_timeout_seconds),
-            segmenter=Sam3Segmenter(configured_settings),
-        )
+        try:
+            application.state.services = Services(
+                settings=configured_settings,
+                client=MapboxClient(configured_settings.mapbox_token, configured_settings.request_timeout_seconds),
+                segmenter=YoloSegmentationDetector.load_huggingface_model(
+                    SEGMENTATION_MODEL_ID, configured_settings.hf_token
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Failed to load YOLO segmentation model %s", configured_settings.model_id)
+            raise
         yield
 
     api = FastAPI(
@@ -213,7 +222,7 @@ def create_api() -> FastAPI:
         services: Services = api.state.services
         try:
             latitude, longitude = _resolve_location(request, services.client)
-            zoom = SAM_INFERENCE_ZOOM
+            zoom = SEGMENTATION_INFERENCE_ZOOM
             satellite_image = get_satellite_image(services.client, latitude, longitude, zoom)
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
             result = services.segmenter.run(satellite_image, latitude, zoom, prompts)
@@ -240,11 +249,11 @@ def create_api() -> FastAPI:
         services: Services = api.state.services
         try:
             selected_polygons = [validate_polygon(polygon) for polygon in request.polygons]
-            min_x, max_x, min_y, max_y = tile_range_for_polygons(selected_polygons, SAM_INFERENCE_ZOOM)
+            min_x, max_x, min_y, max_y = tile_range_for_polygons(selected_polygons, SEGMENTATION_INFERENCE_ZOOM)
             tile_count = (max_x - min_x + 1) * (max_y - min_y + 1)
             if tile_count > request.max_tiles:
                 raise ValueError(
-                    f"Polygon covers {tile_count} tiles at zoom {SAM_INFERENCE_ZOOM}, exceeding the request limit "
+                    f"Polygon covers {tile_count} tiles at zoom {SEGMENTATION_INFERENCE_ZOOM}, exceeding the request limit "
                     f"of {request.max_tiles}. Increase max_tiles or draw a smaller area."
                 )
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
@@ -259,7 +268,6 @@ def create_api() -> FastAPI:
             union_mask = np.zeros((full_height, full_width), dtype=np.uint8)
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
-            meters_per_pixel = 0.0
             chunks = _chunk_tile_bounds(min_x, max_x, min_y, max_y, request.tiles_per_chunk)
             for chunk_min_x, chunk_max_x, chunk_min_y, chunk_max_y in chunks:
                 mosaic = get_satellite_mosaic_for_tile_bounds(
@@ -268,19 +276,15 @@ def create_api() -> FastAPI:
                     chunk_max_x,
                     chunk_min_y,
                     chunk_max_y,
-                    SAM_INFERENCE_ZOOM,
+                    SEGMENTATION_INFERENCE_ZOOM,
                 )
-                result = services.segmenter.run(
-                    mosaic.image, latitude, SAM_INFERENCE_ZOOM, prompts, grid_sizes=(1,)
-                )
-                meters_per_pixel = result.meters_per_pixel
-                summaries.append(result.summary)
-                grid_rows.extend(result.grid_rows)
+                contours = services.segmenter.predict_polygons(mosaic.image)
+                summaries.append(f"YOLO segmentation detected {len(contours)} masks in this whole-image chunk.")
                 clipped_pixel_polygons = _clip_contours_to_input(
-                    result.polygons,
+                    contours,
                     selected_polygons,
                     (mosaic.min_tile_x, mosaic.min_tile_y),
-                    SAM_INFERENCE_ZOOM,
+                    SEGMENTATION_INFERENCE_ZOOM,
                     mosaic.image.size,
                 )
                 for pixel_polygon in clipped_pixel_polygons:
@@ -311,7 +315,7 @@ def create_api() -> FastAPI:
                                 min_y,
                                 int(point[0][0]),
                                 int(point[0][1]),
-                                SAM_INFERENCE_ZOOM,
+                                SEGMENTATION_INFERENCE_ZOOM,
                             )
                         )
                         for point in simplified
@@ -319,15 +323,16 @@ def create_api() -> FastAPI:
                 )
             area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
             return {
-                "zoom": SAM_INFERENCE_ZOOM,
+                "zoom": SEGMENTATION_INFERENCE_ZOOM,
                 "tile_count": tile_count,
                 "chunk_count": len(chunks),
-                "processing_mode": "whole_per_chunk",
-                "summary": f"Processed {len(chunks)} overlapping whole-image chunks at fixed zoom {SAM_INFERENCE_ZOOM}.\n\n"
+                "processing_mode": "yolo_segmentation_per_chunk",
+                "model_id": SEGMENTATION_MODEL_ID,
+                "summary": f"Processed {len(chunks)} overlapping whole-image YOLO segmentation chunks at fixed zoom {SEGMENTATION_INFERENCE_ZOOM}.\n\n"
                 + "\n\n".join(summaries),
                 "grid_results": grid_rows,
                 "polygons": geographic_polygons,
-                "meters_per_pixel": meters_per_pixel,
+                "meters_per_pixel": meters_per_pixel(latitude, SEGMENTATION_INFERENCE_ZOOM),
                 "area_m2": area_m2,
                 "area_ft2": area_m2 * 10.7639,
             }

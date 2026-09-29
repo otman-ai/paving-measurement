@@ -9,14 +9,14 @@ from PIL import Image
 
 from paving_measurement.config import Settings, load_settings
 from paving_measurement.mapbox import MapboxClient
-from paving_measurement.segmentation import Sam3Segmenter
+from paving_measurement.yolo_segmentation import YoloSegmentationDetector
 from paving_measurement.satellite import get_satellite_image
 
 
 def create_app(settings: Settings) -> gr.Blocks:
     """Create the UI. The model loads once when the application starts."""
     client = MapboxClient(settings.mapbox_token, settings.request_timeout_seconds)
-    segmenter = Sam3Segmenter(settings)
+    segmenter = YoloSegmentationDetector.load_huggingface_model(settings.model_id, settings.hf_token)
 
     def get_tiles(address: str, latitude_value: float | None, longitude_value: float | None, zoom: float):
         selected_zoom = int(zoom)
@@ -45,10 +45,10 @@ Source: Mapbox satellite tiles
         result = segmenter.run(image, float(latitude), int(zoom))
         return result.final_overlay, result.comparison, result.summary, result.grid_rows, result.grid_overlays
 
-    with gr.Blocks(title="SAM 3 Asphalt Segmentation") as demo:
-        gr.Markdown("""# SAM 3 Asphalt Segmentation
+    with gr.Blocks(title="YOLO Asphalt Segmentation") as demo:
+        gr.Markdown("""# YOLO Asphalt Segmentation
 
-Mapbox satellite imagery is segmented with SAM 3 to estimate asphalt coverage. Address lookup takes priority over manually entered coordinates.
+Mapbox satellite imagery is segmented with a YOLO instance-segmentation model to estimate asphalt coverage. Address lookup takes priority over manually entered coordinates.
 """)
         gr.Markdown("## 1. Location")
         address = gr.Textbox(label="Address", placeholder="Enter an address, city, road, or landmark")
@@ -60,7 +60,7 @@ Mapbox satellite imagery is segmented with SAM 3 to estimate asphalt coverage. A
         tile_status = gr.Markdown("No satellite image downloaded yet.")
         satellite_image = gr.Image(label="3x3 Mapbox Satellite Tile Mosaic", type="pil")
         gr.Markdown("## 2. Run Segmentation")
-        gr.Markdown(f"Prompt: `{settings.prompt}`  \nGrid strategy: `1x1` through `7x7`  \nBatch size: `{settings.batch_size}`")
+        gr.Markdown(f"Model: `{settings.model_id}`  \nInference uses one whole image; the prompt field is retained only for API compatibility.")
         run_button = gr.Button("Run Asphalt Segmentation", variant="primary")
         gr.Markdown("## 3. Results")
         with gr.Row():
