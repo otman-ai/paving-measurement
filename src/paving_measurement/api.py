@@ -61,6 +61,9 @@ class AnalyzePolygonRequest(BaseModel):
     processing_mode: Literal["whole", "chunked"] = Field(
         default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
     )
+    return_debug_image: bool = Field(
+        default=False, description="Return the exact stitched YOLO input image as a base64 data URL."
+    )
     max_tiles: int = Field(default=400, ge=1, le=900, description="Maximum source tiles across all chunks.")
     tiles_per_chunk: int = Field(default=9, ge=1, le=9, description="Maximum source tiles in each whole-image SAM pass.")
 
@@ -271,6 +274,8 @@ def create_api() -> FastAPI:
             union_mask = np.zeros((full_height, full_width), dtype=np.uint8)
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
+            debug_images: list[str] = []
+            return_debug_image = getattr(request, "return_debug_image", False)
             processing_mode = getattr(request, "processing_mode", "whole")
             chunks = (
                 [(min_x, max_x, min_y, max_y)]
@@ -286,6 +291,8 @@ def create_api() -> FastAPI:
                     chunk_max_y,
                     SEGMENTATION_INFERENCE_ZOOM,
                 )
+                if return_debug_image:
+                    debug_images.append(_as_data_url(mosaic.image, "JPEG"))
                 contours = services.segmenter.predict_polygons(mosaic.image)
                 summaries.append(f"YOLO segmentation detected {len(contours)} masks in this whole-image chunk.")
                 clipped_pixel_polygons = _clip_contours_to_input(
@@ -340,6 +347,7 @@ def create_api() -> FastAPI:
                 + "\n\n".join(summaries),
                 "grid_results": grid_rows,
                 "polygons": geographic_polygons,
+                "debug_images": debug_images,
                 "meters_per_pixel": meters_per_pixel(latitude, SEGMENTATION_INFERENCE_ZOOM),
                 "area_m2": area_m2,
                 "area_ft2": area_m2 * 10.7639,
