@@ -98,12 +98,32 @@ class YoloSegmentationDetector:
                 # Do not use one normalized ring for that case: it would draw
                 # straight connector segments between the separate blobs.
                 if len(external_indices) > 1:
+                    reference_points = None
+                    if normalized_polygons is not None and mask_index < len(normalized_polygons):
+                        normalized_points = np.asarray(normalized_polygons[mask_index], dtype=np.float32)
+                        if normalized_points.ndim == 2 and normalized_points.shape[0] >= 3:
+                            reference_points = np.round(
+                                normalized_points * np.asarray([width, height], dtype=np.float32)
+                            ).astype(np.float32)
+                    data_points = np.concatenate([contours[index].reshape(-1, 2) for index in external_indices]).astype(np.float32)
+                    data_min, data_max = data_points.min(axis=0), data_points.max(axis=0)
+                    if reference_points is not None:
+                        reference_min, reference_max = reference_points.min(axis=0), reference_points.max(axis=0)
+                    else:
+                        reference_min, reference_max = data_min, data_max
+                    scale = (reference_max - reference_min) / np.maximum(data_max - data_min, 1.0)
+
+                    def align_ring(contour: np.ndarray) -> list[list[int]]:
+                        points = contour.reshape(-1, 2).astype(np.float32)
+                        points = (points - data_min) * scale + reference_min
+                        return [[int(round(point[0])), int(round(point[1]))] for point in points]
+
                     for external_index in external_indices:
-                        component_rings = [[[int(point[0][0]), int(point[0][1])] for point in contours[external_index]]]
+                        component_rings = [align_ring(contours[external_index])]
                         child = hierarchy[0][external_index][2]
                         while child != -1:
                             if cv2.contourArea(contours[child]) >= MIN_MASK_COMPONENT_AREA_PX:
-                                component_rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
+                                component_rings.append(align_ring(contours[child]))
                             child = hierarchy[0][child][0]
                         if len(component_rings[0]) >= 3:
                             geometries.append(component_rings)
