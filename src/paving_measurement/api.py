@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import logging
 import math
 from io import BytesIO
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 import numpy as np
@@ -39,6 +39,9 @@ class AnalyzeRequest(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
+    processing_mode: Literal["whole", "chunked"] = Field(
+        default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
+    )
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -268,7 +271,11 @@ def create_api() -> FastAPI:
             union_mask = np.zeros((full_height, full_width), dtype=np.uint8)
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
-            chunks = _chunk_tile_bounds(min_x, max_x, min_y, max_y, request.tiles_per_chunk)
+            chunks = (
+                [(min_x, max_x, min_y, max_y)]
+                if request.processing_mode == "whole"
+                else _chunk_tile_bounds(min_x, max_x, min_y, max_y, request.tiles_per_chunk)
+            )
             for chunk_min_x, chunk_max_x, chunk_min_y, chunk_max_y in chunks:
                 mosaic = get_satellite_mosaic_for_tile_bounds(
                     services.client,
@@ -326,9 +333,9 @@ def create_api() -> FastAPI:
                 "zoom": SEGMENTATION_INFERENCE_ZOOM,
                 "tile_count": tile_count,
                 "chunk_count": len(chunks),
-                "processing_mode": "yolo_segmentation_per_chunk",
+                "processing_mode": request.processing_mode,
                 "model_id": SEGMENTATION_MODEL_ID,
-                "summary": f"Processed {len(chunks)} overlapping whole-image YOLO segmentation chunks at fixed zoom {SEGMENTATION_INFERENCE_ZOOM}.\n\n"
+                "summary": f"Processed {len(chunks)} whole-image YOLO segmentation pass(es) at fixed zoom {SEGMENTATION_INFERENCE_ZOOM}.\n\n"
                 + "\n\n".join(summaries),
                 "grid_results": grid_rows,
                 "polygons": geographic_polygons,
