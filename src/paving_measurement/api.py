@@ -361,9 +361,11 @@ def create_api() -> FastAPI:
                             ]
                             for pixel_x, pixel_y in pixel_ring
                         ])
-                    cv2.fillPoly(union_mask, [np.asarray(global_geometry[0], dtype=np.int32)], 1)
+                    geometry_mask = np.zeros_like(union_mask)
+                    cv2.fillPoly(geometry_mask, [np.asarray(global_geometry[0], dtype=np.int32)], 1)
                     for hole in global_geometry[1:]:
-                        cv2.fillPoly(union_mask, [np.asarray(hole, dtype=np.int32)], 0)
+                        cv2.fillPoly(geometry_mask, [np.asarray(hole, dtype=np.int32)], 0)
+                    union_mask = np.maximum(union_mask, geometry_mask)
             merged_geometries = _mask_geometries(union_mask)
             geographic_geometries: list[list[list[list[float]]]] = []
             for geometry in merged_geometries:
