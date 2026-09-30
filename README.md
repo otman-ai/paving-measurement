@@ -100,7 +100,9 @@ The application reads all configuration from environment variables. `.env` is a 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `HF_TOKEN` | Yes | — | Hugging Face token allowed to access SAM 3 |
-| `MAPBOX_TOKEN` | Yes | — | Mapbox access token |
+| `MAPBOX_TOKEN` | Yes | — | Mapbox access token (geocoding and selectable imagery fallback) |
+| `GOOGLE_MAPS_API_KEY` | No | — | Server-side Google Map Tiles API key; used when `SATELLITE_PROVIDER=google` or a request selects Google imagery |
+| `SATELLITE_PROVIDER` | No | `mapbox` | Default backend imagery provider: `mapbox` or `google` |
 | `MODEL_ID` | No | `otmanheddouch/yolo26n-seg` | Hugging Face YOLO segmentation model ID |
 | `SEGMENTATION_PROMPT` | No | `asphalt pavement` | Text prompt used for SAM 3 |
 | `BATCH_SIZE` | No | `8` | Images per inference batch; adjust for GPU memory |
@@ -223,7 +225,7 @@ The important distinction is that the API does not send one large satellite imag
 
 `parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face oriented-object-detection model `otmanheddouch/yolov8n-obb-09-25-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then each OBB's centre and four rotated corners are converted back to geographic coordinates. This preserves stall orientation and detail for large areas and reduces misses at tile borders. Only detections whose centres lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres. The API also supports `processing_mode: "whole"` as a comparison mode: it downloads the complete tile mosaic and runs one OBB inference over that image.
 
-It uses the existing `paving-measurement-secrets` secret, so it needs `HF_TOKEN` (to download the model) and `MAPBOX_TOKEN` (to download satellite tiles). Deploy it independently:
+It uses the existing `paving-measurement-secrets` secret for `HF_TOKEN` and `MAPBOX_TOKEN`, plus the optional `paving-measurement-google` secret for `GOOGLE_MAPS_API_KEY`. Set `SATELLITE_PROVIDER=google` to make Google the backend default, or send `imagery_provider: "google"` on an individual analysis request; Mapbox remains available with `SATELLITE_PROVIDER=mapbox` or `imagery_provider: "mapbox"`. Deploy it independently:
 
 ```bash
 modal deploy parking_modal_app.py
@@ -298,7 +300,7 @@ The frontend maintains three independent visual layers: the cyan user input poly
 
 ## Deployment notes
 
-- Inject `HF_TOKEN` and `MAPBOX_TOKEN` using the hosting platform's secrets facility; never bake them into an image or source file.
+- Inject `HF_TOKEN`, `MAPBOX_TOKEN`, and (when using Google) `GOOGLE_MAPS_API_KEY` using the hosting platform's secrets facility; never bake them into an image or source file.
 - Run one application worker per GPU. The model is deliberately initialized once per worker, not per request.
 - Mount a persistent Hugging Face cache volume in production to avoid downloading weights after every rollout.
 - Set an upstream request timeout suitable for the selected batch size and GPU. A full multi-grid request evaluates 140 image tiles.

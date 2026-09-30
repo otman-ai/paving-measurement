@@ -19,6 +19,8 @@ class ConfigurationError(ValueError):
 class Settings:
     hf_token: str
     mapbox_token: str
+    google_maps_api_key: str = ""
+    satellite_provider: str = "mapbox"
     model_id: str = "otmanheddouch/yolo26n-seg"
     prompt: str = "asphalt pavement"
     batch_size: int = 8
@@ -38,6 +40,10 @@ class Settings:
             raise ConfigurationError("BATCH_SIZE must be at least 1.")
         if not 0 < self.min_zoom <= self.default_zoom <= self.max_zoom:
             raise ConfigurationError("Zoom settings must satisfy 0 < MIN_ZOOM <= DEFAULT_ZOOM <= MAX_ZOOM.")
+        if self.satellite_provider not in {"mapbox", "google"}:
+            raise ConfigurationError("SATELLITE_PROVIDER must be either 'mapbox' or 'google'.")
+        if self.satellite_provider == "google" and not self.google_maps_api_key:
+            raise ConfigurationError("GOOGLE_MAPS_API_KEY is required when SATELLITE_PROVIDER=google.")
 
 
 def _required(name: str) -> str:
@@ -59,6 +65,8 @@ def load_settings() -> Settings:
     return Settings(
         hf_token=_required("HF_TOKEN"),
         mapbox_token=_required("MAPBOX_TOKEN"),
+        google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY", "").strip(),
+        satellite_provider=os.getenv("SATELLITE_PROVIDER", "mapbox").strip().lower(),
         model_id=os.getenv("MODEL_ID", "otmanheddouch/yolo26n-seg"),
         prompt=os.getenv("SEGMENTATION_PROMPT", "asphalt pavement"),
         batch_size=_integer("BATCH_SIZE", 8),

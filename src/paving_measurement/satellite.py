@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import io
+from typing import Any
 
 from PIL import Image
+import requests
 
 from paving_measurement.geospatial import latlon_to_tile
-from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import tile_range_for_polygons
 
 
@@ -21,8 +23,36 @@ class TileMosaic:
     tile_count: int
 
 
+class GoogleSatelliteClient:
+    """Google Map Tiles satellite client using a long-lived session token."""
+
+    def __init__(self, api_key: str, timeout_seconds: int = 30) -> None:
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        response = requests.post(
+            "https://tile.googleapis.com/v1/createSession",
+            params={"key": api_key},
+            json={"mapType": "satellite", "language": "en-US", "region": "US"},
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        session = response.json().get("session")
+        if not session:
+            raise RuntimeError("Google Map Tiles API did not return a satellite session token.")
+        self.session = session
+
+    def download_tile(self, tile_x: int, tile_y: int, zoom: int) -> Image.Image:
+        response = requests.get(
+            f"https://tile.googleapis.com/v1/2dtiles/{zoom}/{tile_x}/{tile_y}",
+            params={"session": self.session, "key": self.api_key},
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        return Image.open(io.BytesIO(response.content)).convert("RGB")
+
+
 def get_satellite_image(
-    client: MapboxClient, latitude: float, longitude: float, zoom: int
+    client: Any, latitude: float, longitude: float, zoom: int
 ) -> Image.Image:
     """Download the 3 by 3 satellite mosaic centered on a coordinate."""
     fractional_x, fractional_y = latlon_to_tile(latitude, longitude, zoom)
@@ -37,7 +67,7 @@ def get_satellite_image(
 
 
 def get_satellite_mosaic_for_polygons(
-    client: MapboxClient,
+    client: Any,
     polygons: list[list[tuple[float, float]]],
     zoom: int,
     max_tiles: int = 9,
@@ -54,7 +84,7 @@ def get_satellite_mosaic_for_polygons(
 
 
 def get_satellite_mosaic_for_tile_bounds(
-    client: MapboxClient,
+    client: Any,
     min_tile_x: int,
     max_tile_x: int,
     min_tile_y: int,

@@ -22,6 +22,7 @@ from paving_measurement.geospatial import latlon_to_tile, meters_per_pixel
 from paving_measurement.mapbox import MapboxClient
 from paving_measurement.parking_detection import pixel_to_longitude_latitude, tile_range_for_polygons, validate_polygon
 from paving_measurement.satellite import (
+    GoogleSatelliteClient,
     get_satellite_image,
     get_satellite_mosaic_for_tile_bounds,
 )
@@ -40,6 +41,7 @@ class AnalyzeRequest(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
+    imagery_provider: Literal["mapbox", "google"] | None = None
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -59,6 +61,7 @@ class AnalyzePolygonRequest(BaseModel):
     )
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
+    imagery_provider: Literal["mapbox", "google"] | None = None
     processing_mode: Literal["whole", "chunked"] = Field(
         default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
     )
@@ -79,6 +82,8 @@ class AnalyzePolygonRequest(BaseModel):
 class Services:
     settings: Settings
     client: MapboxClient
+    satellite_client: Any
+    google_satellite_client: Any | None
     segmenter: YoloSegmentationDetector
 
 
@@ -203,6 +208,15 @@ def _resolve_location(request: AnalyzeRequest, client: MapboxClient) -> tuple[fl
     return float(request.latitude), float(request.longitude)
 
 
+def _imagery_client(services: Services, provider: str | None) -> Any:
+    selected = provider or services.settings.satellite_provider
+    if selected == "google":
+        if services.google_satellite_client is None:
+            raise ValueError("Google imagery is not configured. Set GOOGLE_MAPS_API_KEY in the backend secret.")
+        return services.google_satellite_client
+    return services.client
+
+
 def create_api() -> FastAPI:
     """Create an API whose lifespan loads the model exactly once per worker."""
 
@@ -211,9 +225,21 @@ def create_api() -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         try:
+            mapbox_client = MapboxClient(configured_settings.mapbox_token, configured_settings.request_timeout_seconds)
+            satellite_client: Any = mapbox_client
+            google_satellite_client: Any | None = None
+            if configured_settings.google_maps_api_key:
+                google_satellite_client = GoogleSatelliteClient(
+                    configured_settings.google_maps_api_key,
+                    configured_settings.request_timeout_seconds,
+                )
+            if configured_settings.satellite_provider == "google":
+                satellite_client = google_satellite_client
             application.state.services = Services(
                 settings=configured_settings,
-                client=MapboxClient(configured_settings.mapbox_token, configured_settings.request_timeout_seconds),
+                client=mapbox_client,
+                satellite_client=satellite_client,
+                google_satellite_client=google_satellite_client,
                 segmenter=YoloSegmentationDetector.load_huggingface_model(
                     SEGMENTATION_MODEL_ID, configured_settings.hf_token
                 ),
@@ -250,7 +276,7 @@ def create_api() -> FastAPI:
             zoom = request.zoom or services.settings.default_zoom
             if not services.settings.min_zoom <= zoom <= services.settings.max_zoom:
                 raise ValueError(f"Zoom must be between {services.settings.min_zoom} and {services.settings.max_zoom}.")
-            image = get_satellite_image(services.client, latitude, longitude, zoom)
+            image = get_satellite_image(_imagery_client(services, request.imagery_provider), latitude, longitude, zoom)
             return {"latitude": latitude, "longitude": longitude, "zoom": zoom, "image": _as_data_url(image, "JPEG")}
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
@@ -261,7 +287,7 @@ def create_api() -> FastAPI:
         try:
             latitude, longitude = _resolve_location(request, services.client)
             zoom = SEGMENTATION_INFERENCE_ZOOM
-            satellite_image = get_satellite_image(services.client, latitude, longitude, zoom)
+            satellite_image = get_satellite_image(_imagery_client(services, request.imagery_provider), latitude, longitude, zoom)
             prompts = [item.strip() for item in (request.prompt or services.settings.prompt).split(",") if item.strip()]
             result = services.segmenter.run(satellite_image, latitude, zoom, prompts)
             return {
@@ -320,7 +346,7 @@ def create_api() -> FastAPI:
             )
             for chunk_min_x, chunk_max_x, chunk_min_y, chunk_max_y in chunks:
                 mosaic = get_satellite_mosaic_for_tile_bounds(
-                    services.client,
+                    _imagery_client(services, request.imagery_provider),
                     chunk_min_x,
                     chunk_max_x,
                     chunk_min_y,
@@ -429,6 +455,7 @@ def create_api() -> FastAPI:
             area_m2 = sum(_geographic_geometry_area_m2(geometry) for geometry in geographic_geometries)
             return {
                 "zoom": SEGMENTATION_INFERENCE_ZOOM,
+                "imagery_provider": request.imagery_provider or services.settings.satellite_provider,
                 "tile_count": tile_count,
                 "chunk_count": len(chunks),
                 "processing_mode": processing_mode,

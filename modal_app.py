@@ -6,7 +6,7 @@ Deploy with: modal deploy modal_app.py
 import modal
 
 APP_NAME = "paving-measurement"
-GPU_TYPE = "A100"
+GPU_TYPE = "T4"
 MODEL_CACHE_PATH = "/cache/huggingface"
 
 app = modal.App(APP_NAME)
@@ -14,6 +14,7 @@ model_cache = modal.Volume.from_name("paving-measurement-hf-cache", create_if_mi
 secrets = modal.Secret.from_name(
     "paving-measurement-secrets", required_keys=["HF_TOKEN", "MAPBOX_TOKEN"]
 )
+google_secrets = modal.Secret.from_name("paving-measurement-google", required_keys=["GOOGLE_MAPS_API_KEY"])
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.11")
@@ -46,7 +47,7 @@ image = (
 @app.function(
     image=image,
     gpu=GPU_TYPE,
-    secrets=[secrets],
+    secrets=[secrets, google_secrets],
     volumes={MODEL_CACHE_PATH: model_cache},
     timeout=60 * 60,
     scaledown_window=5 * 60,
