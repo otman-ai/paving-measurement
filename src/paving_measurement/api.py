@@ -39,9 +39,6 @@ class AnalyzeRequest(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
-    processing_mode: Literal["whole", "chunked"] = Field(
-        default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
-    )
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -61,6 +58,9 @@ class AnalyzePolygonRequest(BaseModel):
     )
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
+    processing_mode: Literal["whole", "chunked"] = Field(
+        default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
+    )
     max_tiles: int = Field(default=400, ge=1, le=900, description="Maximum source tiles across all chunks.")
     tiles_per_chunk: int = Field(default=9, ge=1, le=9, description="Maximum source tiles in each whole-image SAM pass.")
 
