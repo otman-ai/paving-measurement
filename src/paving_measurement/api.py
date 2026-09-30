@@ -271,9 +271,10 @@ def create_api() -> FastAPI:
             union_mask = np.zeros((full_height, full_width), dtype=np.uint8)
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
+            processing_mode = getattr(request, "processing_mode", "whole")
             chunks = (
                 [(min_x, max_x, min_y, max_y)]
-                if request.processing_mode == "whole"
+                if processing_mode == "whole"
                 else _chunk_tile_bounds(min_x, max_x, min_y, max_y, request.tiles_per_chunk)
             )
             for chunk_min_x, chunk_max_x, chunk_min_y, chunk_max_y in chunks:
@@ -333,7 +334,7 @@ def create_api() -> FastAPI:
                 "zoom": SEGMENTATION_INFERENCE_ZOOM,
                 "tile_count": tile_count,
                 "chunk_count": len(chunks),
-                "processing_mode": request.processing_mode,
+                "processing_mode": processing_mode,
                 "model_id": SEGMENTATION_MODEL_ID,
                 "summary": f"Processed {len(chunks)} whole-image YOLO segmentation pass(es) at fixed zoom {SEGMENTATION_INFERENCE_ZOOM}.\n\n"
                 + "\n\n".join(summaries),
