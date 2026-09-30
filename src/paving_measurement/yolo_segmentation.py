@@ -62,7 +62,7 @@ class YoloSegmentationDetector:
         return [geometry[0] for geometry in geometries if geometry]
 
     def predict_geometries(
-        self, image: Image.Image, imgsz: int = 1280, confidence: float | None = None
+        self, image: Image.Image, imgsz: int = 640, confidence: float | None = None
     ) -> list[list[list[list[int]]]]:
         """Return mask geometries as outer rings followed by interior holes."""
         original = image.convert("RGB")
@@ -88,6 +88,24 @@ class YoloSegmentationDetector:
                 resized = cv2.resize(mask.astype(np.uint8), (original.width, original.height), interpolation=cv2.INTER_NEAREST)
                 binary = (resized > 0).astype(np.uint8)
                 contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                external_indices = [] if hierarchy is None else [
+                    index for index in range(len(contours))
+                    if hierarchy[0][index][3] == -1 and cv2.contourArea(contours[index]) >= 1
+                ]
+                # A YOLO mask can occasionally contain disconnected blobs.
+                # Do not use one normalized ring for that case: it would draw
+                # straight connector segments between the separate blobs.
+                if len(external_indices) > 1:
+                    for external_index in external_indices:
+                        component_rings = [[[int(point[0][0]), int(point[0][1])] for point in contours[external_index]]]
+                        child = hierarchy[0][external_index][2]
+                        while child != -1:
+                            if cv2.contourArea(contours[child]) >= 1:
+                                component_rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
+                            child = hierarchy[0][child][0]
+                        if len(component_rings[0]) >= 3:
+                            geometries.append(component_rings)
+                    continue
                 outer: list[list[int]] | None = None
                 if normalized_polygons is not None and mask_index < len(normalized_polygons):
                     points = np.asarray(normalized_polygons[mask_index], dtype=np.float32)
