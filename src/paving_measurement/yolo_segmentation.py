@@ -76,32 +76,42 @@ class YoloSegmentationDetector:
         masks = getattr(result, "masks", None)
         if masks is None:
             return []
+        normalized_polygons = getattr(masks, "xyn", None)
         mask_data = getattr(masks, "data", None)
         if mask_data is not None:
             import cv2
 
             mask_array = mask_data.detach().cpu().numpy() if hasattr(mask_data, "detach") else np.asarray(mask_data)
             geometries: list[list[list[list[int]]]] = []
-            for mask in mask_array:
+            width, height = original.size
+            for mask_index, mask in enumerate(mask_array):
                 resized = cv2.resize(mask.astype(np.uint8), (original.width, original.height), interpolation=cv2.INTER_NEAREST)
                 binary = (resized > 0).astype(np.uint8)
                 contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-                if hierarchy is None:
+                outer: list[list[int]] | None = None
+                if normalized_polygons is not None and mask_index < len(normalized_polygons):
+                    points = np.asarray(normalized_polygons[mask_index], dtype=np.float32)
+                    if points.ndim == 2 and points.shape[0] >= 3:
+                        pixel_points = np.round(points * np.asarray([width, height], dtype=np.float32)).astype(np.int32)
+                        pixel_points[:, 0] = np.clip(pixel_points[:, 0], 0, width - 1)
+                        pixel_points[:, 1] = np.clip(pixel_points[:, 1], 0, height - 1)
+                        outer = [[int(point[0]), int(point[1])] for point in pixel_points]
+                if outer is None and hierarchy is not None:
+                    for index, contour in enumerate(contours):
+                        if hierarchy[0][index][3] == -1 and cv2.contourArea(contour) >= 1:
+                            outer = [[int(point[0][0]), int(point[0][1])] for point in contour]
+                            break
+                if outer is None or len(outer) < 3:
                     continue
-                rings: list[list[list[int]]] = []
-                for index, contour in enumerate(contours):
-                    if hierarchy[0][index][3] == -1 and cv2.contourArea(contour) >= 4:
-                        rings.append([[int(point[0][0]), int(point[0][1])] for point in contour])
-                        child = hierarchy[0][index][2]
-                        while child != -1:
-                            if cv2.contourArea(contours[child]) >= 4:
-                                rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
-                            child = hierarchy[0][child][0]
-                if rings:
-                    geometries.append(rings)
-            return geometries
+                rings = [outer]
+                if hierarchy is not None:
+                    for index, contour in enumerate(contours):
+                        if hierarchy[0][index][3] != -1 and cv2.contourArea(contour) >= 1:
+                            rings.append([[int(point[0][0]), int(point[0][1])] for point in contour])
+                geometries.append(rings)
+            if geometries:
+                return geometries
 
-        normalized_polygons = getattr(masks, "xyn", None)
         if normalized_polygons is None:
             return []
         width, height = original.size
