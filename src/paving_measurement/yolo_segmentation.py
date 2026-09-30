@@ -14,6 +14,7 @@ from paving_measurement.geospatial import calculate_area
 from paving_measurement.image_ops import create_comparison, overlay_masks
 
 LOGGER = logging.getLogger(__name__)
+MIN_MASK_COMPONENT_AREA_PX = 16
 
 
 @dataclass
@@ -90,7 +91,8 @@ class YoloSegmentationDetector:
                 contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
                 external_indices = [] if hierarchy is None else [
                     index for index in range(len(contours))
-                    if hierarchy[0][index][3] == -1 and cv2.contourArea(contours[index]) >= 1
+                    if hierarchy[0][index][3] == -1
+                    and cv2.contourArea(contours[index]) >= MIN_MASK_COMPONENT_AREA_PX
                 ]
                 # A YOLO mask can occasionally contain disconnected blobs.
                 # Do not use one normalized ring for that case: it would draw
@@ -100,11 +102,13 @@ class YoloSegmentationDetector:
                         component_rings = [[[int(point[0][0]), int(point[0][1])] for point in contours[external_index]]]
                         child = hierarchy[0][external_index][2]
                         while child != -1:
-                            if cv2.contourArea(contours[child]) >= 1:
+                            if cv2.contourArea(contours[child]) >= MIN_MASK_COMPONENT_AREA_PX:
                                 component_rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
                             child = hierarchy[0][child][0]
                         if len(component_rings[0]) >= 3:
                             geometries.append(component_rings)
+                    continue
+                if hierarchy is not None and not external_indices:
                     continue
                 outer: list[list[int]] | None = None
                 if normalized_polygons is not None and mask_index < len(normalized_polygons):
@@ -116,7 +120,7 @@ class YoloSegmentationDetector:
                         outer = [[int(point[0]), int(point[1])] for point in pixel_points]
                 if outer is None and hierarchy is not None:
                     for index, contour in enumerate(contours):
-                        if hierarchy[0][index][3] == -1 and cv2.contourArea(contour) >= 1:
+                        if hierarchy[0][index][3] == -1 and cv2.contourArea(contour) >= MIN_MASK_COMPONENT_AREA_PX:
                             outer = [[int(point[0][0]), int(point[0][1])] for point in contour]
                             break
                 if outer is None or len(outer) < 3:
@@ -124,7 +128,7 @@ class YoloSegmentationDetector:
                 rings = [outer]
                 if hierarchy is not None:
                     for index, contour in enumerate(contours):
-                        if hierarchy[0][index][3] != -1 and cv2.contourArea(contour) >= 1:
+                        if hierarchy[0][index][3] != -1 and cv2.contourArea(contour) >= MIN_MASK_COMPONENT_AREA_PX:
                             rings.append([[int(point[0][0]), int(point[0][1])] for point in contour])
                 geometries.append(rings)
             if geometries:
