@@ -310,6 +310,7 @@ def create_api() -> FastAPI:
             debug_overlays: list[str] = []
             mask_counts: list[int] = []
             input_dimensions: list[list[int]] = []
+            collected_global_geometries: list[list[list[list[int]]]] = []
             return_debug_image = getattr(request, "return_debug_image", False)
             processing_mode = getattr(request, "processing_mode", "whole")
             chunks = (
@@ -366,7 +367,15 @@ def create_api() -> FastAPI:
                     for hole in global_geometry[1:]:
                         cv2.fillPoly(geometry_mask, [np.asarray(hole, dtype=np.int32)], 0)
                     union_mask = np.maximum(union_mask, geometry_mask)
-            merged_geometries = _mask_geometries(union_mask)
+                    collected_global_geometries.append(global_geometry)
+            # Whole-image inference already has one authoritative pass, so
+            # preserve each instance separately. Raster union is only needed
+            # for overlapping chunk results, where it removes duplicates.
+            merged_geometries = (
+                collected_global_geometries
+                if processing_mode == "whole"
+                else _mask_geometries(union_mask)
+            )
             geographic_geometries: list[list[list[list[float]]]] = []
             for geometry in merged_geometries:
                 geographic_geometry = []
