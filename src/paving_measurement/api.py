@@ -310,7 +310,7 @@ def create_api() -> FastAPI:
             debug_overlays: list[str] = []
             mask_counts: list[int] = []
             input_dimensions: list[list[int]] = []
-            collected_global_geometries: list[list[list[list[int]]]] = []
+            collected_instance_masks: list[np.ndarray] = []
             return_debug_image = getattr(request, "return_debug_image", False)
             processing_mode = getattr(request, "processing_mode", "whole")
             chunks = (
@@ -367,15 +367,45 @@ def create_api() -> FastAPI:
                     for hole in global_geometry[1:]:
                         cv2.fillPoly(geometry_mask, [np.asarray(hole, dtype=np.int32)], 0)
                     union_mask = np.maximum(union_mask, geometry_mask)
-                    collected_global_geometries.append(global_geometry)
+                    collected_instance_masks.append(geometry_mask)
             # Whole-image inference already has one authoritative pass, so
             # preserve each instance separately. Raster union is only needed
             # for overlapping chunk results, where it removes duplicates.
-            merged_geometries = (
-                collected_global_geometries
-                if processing_mode == "whole"
-                else _mask_geometries(union_mask)
-            )
+            if processing_mode == "whole":
+                # Deduplicate overlapping instances without merging merely
+                # adjacent objects. Connected components are formed only when
+                # two masks share a meaningful number of pixels.
+                parent = list(range(len(collected_instance_masks)))
+
+                def find(index: int) -> int:
+                    while parent[index] != index:
+                        parent[index] = parent[parent[index]]
+                        index = parent[index]
+                    return index
+
+                def union(left: int, right: int) -> None:
+                    left_root, right_root = find(left), find(right)
+                    if left_root != right_root:
+                        parent[right_root] = left_root
+
+                for left in range(len(collected_instance_masks)):
+                    left_mask = collected_instance_masks[left]
+                    left_area = int(left_mask.sum())
+                    if left_area == 0:
+                        continue
+                    for right in range(left + 1, len(collected_instance_masks)):
+                        right_mask = collected_instance_masks[right]
+                        overlap = int(np.logical_and(left_mask, right_mask).sum())
+                        if overlap >= 32 or overlap / max(1, min(left_area, int(right_mask.sum()))) >= 0.02:
+                            union(left, right)
+
+                grouped_masks: dict[int, np.ndarray] = {}
+                for index, instance_mask in enumerate(collected_instance_masks):
+                    root = find(index)
+                    grouped_masks[root] = np.maximum(grouped_masks.get(root, np.zeros_like(union_mask)), instance_mask)
+                merged_geometries = [geometry for mask in grouped_masks.values() for geometry in _mask_geometries(mask)]
+            else:
+                merged_geometries = _mask_geometries(union_mask)
             geographic_geometries: list[list[list[list[float]]]] = []
             for geometry in merged_geometries:
                 geographic_geometry = []
