@@ -59,6 +59,7 @@ class AnalyzePolygonRequest(BaseModel):
         min_length=1,
         description="One or more polygon rings; each position is [longitude, latitude].",
     )
+    exclude_polygons: list[list[list[float]]] = Field(default_factory=list, description="Optional user-marked error regions to exclude from the measurement.")
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
@@ -74,6 +75,8 @@ class AnalyzePolygonRequest(BaseModel):
     @model_validator(mode="after")
     def has_valid_polygons(self) -> "AnalyzePolygonRequest":
         for polygon in self.polygons:
+            validate_polygon(polygon)
+        for polygon in self.exclude_polygons:
             validate_polygon(polygon)
         return self
 
@@ -126,6 +129,7 @@ def _mask_geometries(mask: np.ndarray) -> list[list[list[list[int]]]]:
 def _clip_geometries_to_input(
     geometries: list[list[list[list[int]]]],
     input_polygons: list[list[tuple[float, float]]],
+    exclude_polygons: list[list[tuple[float, float]]],
     mosaic_origin: tuple[int, int],
     zoom: int,
     image_size: tuple[int, int],
@@ -144,6 +148,13 @@ def _clip_geometries_to_input(
             for tile_x, tile_y in [latlon_to_tile(latitude, longitude, zoom)]
         ]
         cv2.fillPoly(input_mask, [np.asarray(points, dtype=np.int32)], 1)
+    for polygon in exclude_polygons:
+        points = [
+            [round(tile_x * 256 - origin_x * 256), round(tile_y * 256 - origin_y * 256)]
+            for longitude, latitude in polygon
+            for tile_x, tile_y in [latlon_to_tile(latitude, longitude, zoom)]
+        ]
+        cv2.fillPoly(input_mask, [np.asarray(points, dtype=np.int32)], 0)
 
     clipped: list[list[list[list[int]]]] = []
     for geometry in geometries:
@@ -313,6 +324,7 @@ def create_api() -> FastAPI:
         services: Services = api.state.services
         try:
             selected_polygons = [validate_polygon(polygon) for polygon in request.polygons]
+            exclude_polygons = [validate_polygon(polygon) for polygon in request.exclude_polygons]
             min_x, max_x, min_y, max_y = tile_range_for_polygons(selected_polygons, SEGMENTATION_INFERENCE_ZOOM)
             tile_count = (max_x - min_x + 1) * (max_y - min_y + 1)
             if tile_count > request.max_tiles:
@@ -374,6 +386,7 @@ def create_api() -> FastAPI:
                 clipped_geometries = _clip_geometries_to_input(
                     geometries,
                     selected_polygons,
+                    exclude_polygons,
                     (mosaic.min_tile_x, mosaic.min_tile_y),
                     SEGMENTATION_INFERENCE_ZOOM,
                     mosaic.image.size,
