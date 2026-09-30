@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
 from pydantic import BaseModel, Field, model_validator
 
 from paving_measurement.config import Settings, load_settings
@@ -98,14 +99,33 @@ def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
     )
 
 
-def _clip_contours_to_input(
-    contours: list[list[list[int]]],
+def _mask_geometries(mask: np.ndarray) -> list[list[list[list[int]]]]:
+    """Convert a binary mask to GeoJSON-style rings, retaining holes."""
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return []
+    geometries: list[list[list[list[int]]]] = []
+    for index, contour in enumerate(contours):
+        if hierarchy[0][index][3] != -1 or cv2.contourArea(contour) < 4:
+            continue
+        rings = [[[int(point[0][0]), int(point[0][1])] for point in contour]]
+        child = hierarchy[0][index][2]
+        while child != -1:
+            if cv2.contourArea(contours[child]) >= 4:
+                rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
+            child = hierarchy[0][child][0]
+        geometries.append(rings)
+    return geometries
+
+
+def _clip_geometries_to_input(
+    geometries: list[list[list[list[int]]]],
     input_polygons: list[list[tuple[float, float]]],
     mosaic_origin: tuple[int, int],
     zoom: int,
     image_size: tuple[int, int],
-) -> list[list[list[int]]]:
-    """Clip SAM contours to the drawn geographic regions before returning them."""
+) -> list[list[list[list[int]]]]:
+    """Clip mask geometries to drawn geographic regions without dropping holes."""
     width, height = image_size
     input_mask = np.zeros((height, width), dtype=np.uint8)
     origin_x, origin_y = mosaic_origin
@@ -120,21 +140,33 @@ def _clip_contours_to_input(
         ]
         cv2.fillPoly(input_mask, [np.asarray(points, dtype=np.int32)], 1)
 
-    clipped: list[list[list[int]]] = []
-    for contour in contours:
+    clipped: list[list[list[list[int]]]] = []
+    for geometry in geometries:
+        if not geometry:
+            continue
         contour_mask = np.zeros((height, width), dtype=np.uint8)
-        points = np.asarray(contour, dtype=np.int32)
-        cv2.fillPoly(contour_mask, [points], 1)
+        cv2.fillPoly(contour_mask, [np.asarray(geometry[0], dtype=np.int32)], 1)
+        for hole in geometry[1:]:
+            cv2.fillPoly(contour_mask, [np.asarray(hole, dtype=np.int32)], 0)
         intersection = cv2.bitwise_and(contour_mask, input_mask)
-        clipped_contours, _ = cv2.findContours(intersection, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for clipped_contour in clipped_contours:
-            if cv2.contourArea(clipped_contour) < 4:
-                continue
-            simplified = cv2.approxPolyDP(clipped_contour, 1.5, True)
-            clipped_points = [[int(point[0][0]), int(point[0][1])] for point in simplified]
-            if len(clipped_points) >= 3:
-                clipped.append(clipped_points)
+        for clipped_geometry in _mask_geometries(intersection):
+            simplified_geometry: list[list[list[int]]] = []
+            for ring in clipped_geometry:
+                simplified = cv2.approxPolyDP(np.asarray(ring, dtype=np.int32), 1.5, True)
+                points = [[int(point[0][0]), int(point[0][1])] for point in simplified]
+                if len(points) >= 3:
+                    simplified_geometry.append(points)
+            if simplified_geometry:
+                clipped.append(simplified_geometry)
     return clipped
+
+
+def _geographic_geometry_area_m2(geometry: list[list[list[float]]]) -> float:
+    if not geometry:
+        return 0.0
+    return max(0.0, _geographic_polygon_area_m2(geometry[0]) - sum(
+        _geographic_polygon_area_m2(ring) for ring in geometry[1:]
+    ))
 
 
 def _as_data_url(image: Any, image_format: str = "PNG") -> str:
@@ -275,6 +307,9 @@ def create_api() -> FastAPI:
             grid_rows: list[list[str | int]] = []
             summaries: list[str] = []
             debug_images: list[str] = []
+            debug_overlays: list[str] = []
+            mask_counts: list[int] = []
+            input_dimensions: list[list[int]] = []
             return_debug_image = getattr(request, "return_debug_image", False)
             processing_mode = getattr(request, "processing_mode", "whole")
             chunks = (
@@ -293,50 +328,64 @@ def create_api() -> FastAPI:
                 )
                 if return_debug_image:
                     debug_images.append(_as_data_url(mosaic.image, "JPEG"))
-                contours = services.segmenter.predict_polygons(mosaic.image)
-                summaries.append(f"YOLO segmentation detected {len(contours)} masks in this whole-image chunk.")
-                clipped_pixel_polygons = _clip_contours_to_input(
-                    contours,
+                geometries = services.segmenter.predict_geometries(mosaic.image)
+                mask_counts.append(len(geometries))
+                input_dimensions.append([mosaic.image.width, mosaic.image.height])
+                if return_debug_image:
+                    overlay = np.asarray(mosaic.image.convert("RGB")).copy()
+                    for geometry in geometries:
+                        for ring in geometry:
+                            cv2.polylines(
+                                overlay,
+                                [np.asarray(ring, dtype=np.int32)],
+                                isClosed=True,
+                                color=(255, 0, 0) if ring is geometry[0] else (0, 0, 0),
+                                thickness=2,
+                            )
+                    debug_overlays.append(_as_data_url(Image.fromarray(overlay), "JPEG"))
+                summaries.append(f"YOLO segmentation detected {len(geometries)} masks in this whole-image chunk.")
+                clipped_geometries = _clip_geometries_to_input(
+                    geometries,
                     selected_polygons,
                     (mosaic.min_tile_x, mosaic.min_tile_y),
                     SEGMENTATION_INFERENCE_ZOOM,
                     mosaic.image.size,
                 )
-                for pixel_polygon in clipped_pixel_polygons:
-                    global_points = np.asarray(
-                        [
+                for pixel_geometry in clipped_geometries:
+                    global_geometry = []
+                    for pixel_ring in pixel_geometry:
+                        global_geometry.append([
                             [
                                 pixel_x + (mosaic.min_tile_x - min_x) * 256,
                                 pixel_y + (mosaic.min_tile_y - min_y) * 256,
                             ]
-                            for pixel_x, pixel_y in pixel_polygon
-                        ],
-                        dtype=np.int32,
-                    )
-                    cv2.fillPoly(union_mask, [global_points], 1)
-            merged_contours, _ = cv2.findContours(union_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            geographic_polygons: list[list[list[float]]] = []
-            for contour in merged_contours:
-                if cv2.contourArea(contour) < 4:
-                    continue
-                simplified = cv2.approxPolyDP(contour, 1.5, True)
-                if len(simplified) < 3:
-                    continue
-                geographic_polygons.append(
-                    [
-                        list(
-                            pixel_to_longitude_latitude(
-                                min_x,
-                                min_y,
-                                int(point[0][0]),
-                                int(point[0][1]),
-                                SEGMENTATION_INFERENCE_ZOOM,
-                            )
-                        )
+                            for pixel_x, pixel_y in pixel_ring
+                        ])
+                    cv2.fillPoly(union_mask, [np.asarray(global_geometry[0], dtype=np.int32)], 1)
+                    for hole in global_geometry[1:]:
+                        cv2.fillPoly(union_mask, [np.asarray(hole, dtype=np.int32)], 0)
+            merged_geometries = _mask_geometries(union_mask)
+            geographic_geometries: list[list[list[list[float]]]] = []
+            for geometry in merged_geometries:
+                geographic_geometry = []
+                for ring in geometry:
+                    simplified = cv2.approxPolyDP(np.asarray(ring, dtype=np.int32), 1.5, True)
+                    if len(simplified) < 3:
+                        continue
+                    geographic_geometry.append([
+                        list(pixel_to_longitude_latitude(
+                            min_x,
+                            min_y,
+                            int(point[0][0]),
+                            int(point[0][1]),
+                            SEGMENTATION_INFERENCE_ZOOM,
+                        ))
                         for point in simplified
-                    ]
-                )
-            area_m2 = sum(_geographic_polygon_area_m2(polygon) for polygon in geographic_polygons)
+                    ])
+                if geographic_geometry:
+                    geographic_geometries.append(geographic_geometry)
+            geographic_polygons = [geometry[0] for geometry in geographic_geometries]
+            area_m2 = sum(_geographic_geometry_area_m2(geometry) for geometry in geographic_geometries)
             return {
                 "zoom": SEGMENTATION_INFERENCE_ZOOM,
                 "tile_count": tile_count,
@@ -347,7 +396,11 @@ def create_api() -> FastAPI:
                 + "\n\n".join(summaries),
                 "grid_results": grid_rows,
                 "polygons": geographic_polygons,
+                "polygon_geometries": geographic_geometries,
                 "debug_images": debug_images,
+                "debug_overlays": debug_overlays,
+                "mask_counts": mask_counts,
+                "input_dimensions": input_dimensions,
                 "meters_per_pixel": meters_per_pixel(latitude, SEGMENTATION_INFERENCE_ZOOM),
                 "area_m2": area_m2,
                 "area_ft2": area_m2 * 10.7639,

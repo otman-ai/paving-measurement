@@ -58,6 +58,13 @@ class YoloSegmentationDetector:
         to ``predict``. Converting it with that image's dimensions avoids using
         the model's internal 640x640 mask tensor as if it were the mosaic size.
         """
+        geometries = self.predict_geometries(image, imgsz, confidence)
+        return [geometry[0] for geometry in geometries if geometry]
+
+    def predict_geometries(
+        self, image: Image.Image, imgsz: int = 1280, confidence: float | None = None
+    ) -> list[list[list[list[int]]]]:
+        """Return mask geometries as outer rings followed by interior holes."""
         original = image.convert("RGB")
         result = self.model.predict(
             original,
@@ -69,11 +76,36 @@ class YoloSegmentationDetector:
         masks = getattr(result, "masks", None)
         if masks is None:
             return []
+        mask_data = getattr(masks, "data", None)
+        if mask_data is not None:
+            import cv2
+
+            mask_array = mask_data.detach().cpu().numpy() if hasattr(mask_data, "detach") else np.asarray(mask_data)
+            geometries: list[list[list[list[int]]]] = []
+            for mask in mask_array:
+                resized = cv2.resize(mask.astype(np.uint8), (original.width, original.height), interpolation=cv2.INTER_NEAREST)
+                binary = (resized > 0).astype(np.uint8)
+                contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                if hierarchy is None:
+                    continue
+                rings: list[list[list[int]]] = []
+                for index, contour in enumerate(contours):
+                    if hierarchy[0][index][3] == -1 and cv2.contourArea(contour) >= 4:
+                        rings.append([[int(point[0][0]), int(point[0][1])] for point in contour])
+                        child = hierarchy[0][index][2]
+                        while child != -1:
+                            if cv2.contourArea(contours[child]) >= 4:
+                                rings.append([[int(point[0][0]), int(point[0][1])] for point in contours[child]])
+                            child = hierarchy[0][child][0]
+                if rings:
+                    geometries.append(rings)
+            return geometries
+
         normalized_polygons = getattr(masks, "xyn", None)
         if normalized_polygons is None:
             return []
         width, height = original.size
-        contours: list[list[list[int]]] = []
+        geometries = []
         for normalized in normalized_polygons:
             points = np.asarray(normalized, dtype=np.float32)
             if points.ndim != 2 or points.shape[0] < 3:
@@ -83,8 +115,8 @@ class YoloSegmentationDetector:
             pixel_points[:, 1] = np.clip(pixel_points[:, 1], 0, height - 1)
             contour = [[int(point[0]), int(point[1])] for point in pixel_points]
             if len(contour) >= 3:
-                contours.append(contour)
-        return contours
+                geometries.append([contour])
+        return geometries
 
     def run(
         self,
