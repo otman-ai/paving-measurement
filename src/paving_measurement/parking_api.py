@@ -31,7 +31,7 @@ class ParkingDetectionRequest(BaseModel):
     confidence: float = Field(default=0.25, gt=0, lt=1)
     max_tiles: int = Field(default=400, ge=1, le=900)
     imgsz: int = Field(default=1280, ge=256, le=1536)
-    duplicate_distance_meters: float = Field(default=2.0, gt=0, le=20)
+    duplicate_distance_meters: float = Field(default=2.5, gt=0, le=20, description="Minimum geographic separation between returned stall centres.")
 
     @field_validator("polygons")
     @classmethod
