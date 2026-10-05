@@ -85,6 +85,12 @@ class YoloSegmentationDetector:
             import cv2
 
             mask_array = mask_data.detach().cpu().numpy() if hasattr(mask_data, "detach") else np.asarray(mask_data)
+            # Semantic checkpoints may return one raster as [H, W], while
+            # instance checkpoints return [N, H, W]. Normalize both forms.
+            if mask_array.ndim == 2:
+                mask_array = mask_array[None, ...]
+            elif mask_array.ndim == 4 and mask_array.shape[0] == 1:
+                mask_array = mask_array[0]
             geometries: list[list[list[list[int]]]] = []
             width, height = original.size
             for mask_index, mask in enumerate(mask_array):
