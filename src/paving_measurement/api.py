@@ -43,7 +43,7 @@ class AnalyzeRequest(BaseModel):
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
-    segmentation_mode: Literal["instance", "semantic"] = "instance"
+    segmentation_mode: Literal["instance", "semantic", "union"] = "instance"
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -65,7 +65,7 @@ class AnalyzePolygonRequest(BaseModel):
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
-    segmentation_mode: Literal["instance", "semantic"] = "instance"
+    segmentation_mode: Literal["instance", "semantic", "union"] = "instance"
     processing_mode: Literal["whole", "chunked"] = Field(
         default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
     )
@@ -374,11 +374,18 @@ def create_api() -> FastAPI:
                 )
                 if return_debug_image:
                     debug_images.append(_as_data_url(mosaic.image, "JPEG"))
-                segmenter = services.semantic_segmenter if request.segmentation_mode == "semantic" else services.segmenter
-                geometries = segmenter.predict_geometries(
-                    mosaic.image,
-                    confidence=0.0 if request.segmentation_mode == "semantic" else None,
-                )
+                if request.segmentation_mode == "semantic":
+                    segmenters = [(services.semantic_segmenter, 0.0)]
+                elif request.segmentation_mode == "union":
+                    # Run both checkpoints on the exact same mosaic. The
+                    # shared-mask deduplication below makes this a unified
+                    # result: either model can fill a missed region.
+                    segmenters = [(services.segmenter, None), (services.semantic_segmenter, 0.0)]
+                else:
+                    segmenters = [(services.segmenter, None)]
+                geometries = []
+                for segmenter, confidence in segmenters:
+                    geometries.extend(segmenter.predict_geometries(mosaic.image, confidence=confidence))
                 mask_counts.append(len(geometries))
                 input_dimensions.append([mosaic.image.width, mosaic.image.height])
                 if return_debug_image:
