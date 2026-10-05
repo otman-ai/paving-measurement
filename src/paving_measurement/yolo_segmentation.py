@@ -76,7 +76,13 @@ class YoloSegmentationDetector:
             verbose=False,
             max_det=2000,
         )[0]
+        # Ultralytics instance models expose ``result.masks``.  The semantic
+        # checkpoint exposes a separate ``result.semantic_mask`` object and
+        # may still define ``result.masks`` as None, so do not use a nested
+        # getattr default here (it would stop at the None instance field).
         masks = getattr(result, "masks", None)
+        if masks is None:
+            masks = getattr(result, "semantic_mask", None)
         if masks is None:
             return []
         normalized_polygons = getattr(masks, "xyn", None)

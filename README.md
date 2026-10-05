@@ -1,6 +1,6 @@
 # Paving Measurement
 
-A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes a YOLO26 segmentation API and an independent YOLO oriented parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
+A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes selectable YOLO26 instance/semantic segmentation and an independent YOLO oriented parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
@@ -62,7 +62,7 @@ tests/              focused unit tests
 ## Prerequisites
 
 - Python 3.10 or later
-- A Hugging Face account with access to [`facebook/sam3`](https://huggingface.co/facebook/sam3)
+- A Hugging Face account with access to `otmanheddouch/yolo26n-seg`
 - A Mapbox access token with Geocoding and Tiles API access
 - An NVIDIA GPU is strongly recommended. CPU inference is supported but can be very slow.
 
@@ -129,7 +129,7 @@ For a CPU-only deployment, replace the `Dockerfile` base image with an appropria
 
 ## Modal deployment with FastAPI
 
-`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses one NVIDIA A100 GPU, loads the YOLO segmentation checkpoint `otmanheddouch/yolo26n-seg` once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. The segmentation model is class-driven and does not use text prompts; the legacy `prompt` field is accepted for request compatibility.
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses a T4 GPU, loads both `best.pt` (instance masks) and `sem-yolo.pt` (semantic parking-area masks) once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. The legacy `prompt` field is accepted for request compatibility.
 
 Install and authenticate the Modal CLI:
 
@@ -162,7 +162,9 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
-`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves only the Mapbox tiles that contain the selected area, runs YOLO26 segmentation at fixed inference zoom 20, and returns the detected mask contours in the same geographic coordinate order for drawing directly on a web map. The default `processing_mode: "whole"` stitches the complete selected tile rectangle into one image and sends that image to YOLO, matching the direct-image inference workflow. `processing_mode: "chunked"` remains available for very large regions and splits them into overlapping source-image chunks (up to nine Mapbox tiles per chunk). The map's visual zoom is not used for model quality.
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves tiles from the selected Mapbox or Google provider, runs fixed inference zoom 20, and returns geographic mask contours. Set `segmentation_mode` to `instance` (default) or `semantic`; semantic mode uses `sem-yolo.pt` and returns parking-area masks. The default `processing_mode: "whole"` stitches the complete selected tile rectangle into one image. The map's visual zoom is not used for model quality.
+
+The frontend erase brush is deliberately browser-only. It subtracts brush strokes from the returned mask geometry and recalculates the displayed area locally; brush coordinates are not sent back to the model API. This allows human correction without rerunning inference.
 
 The separate [`frontend/`](frontend/README.md) project provides address navigation, a full-screen MapLibre satellite map, polygon drawing/editing, layer visibility controls, YOLO mask editing, oriented stall boxes, and real-world quantity summaries.
 
@@ -177,7 +179,7 @@ The map workflow uses `POST /v1/analyze-polygon`:
 }
 ```
 
-The service validates the ring and uses fixed inference zoom 20 regardless of the map's visual zoom. In whole mode it stitches the complete inclusive Mapbox tile rectangle into one image and passes it to `otmanheddouch/yolo26n-seg`. In chunked mode it splits that rectangle into overlapping whole-image inputs. Ultralytics returns normalized mask polygons (`results.masks.xyn`); the service scales them to the input image, clips them to the input polygon, and rasterizes all contours into one shared mask before final contour extraction. This geometric union prevents overlapping chunks from producing duplicate or double-shaded objects. Every contour point is then projected back to `[longitude, latitude]` using the image tile origin and fixed zoom.
+The service validates the ring and uses fixed inference zoom 20 regardless of the map's visual zoom. In whole mode it stitches the complete inclusive provider tile rectangle into one image. Instance mode uses `best.pt`; semantic mode uses `sem-yolo.pt` and treats the returned raster masks as parking-area coverage. Ultralytics mask coordinates are scaled to the actual mosaic, clipped to the input polygon, and projected back to `[longitude, latitude]` using the tile origin and fixed zoom.
 
 Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded imagery. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser. `tile_count` is the total source-tile count and `chunk_count` reports the number of whole-image YOLO passes.
 
@@ -187,7 +189,9 @@ Response shape:
 {
   "tile_count": 4,
   "chunk_count": 1,
-  "processing_mode": "whole_per_chunk",
+  "processing_mode": "whole",
+  "segmentation_mode": "instance",
+  "polygon_geometries": [[[[ -77.0364, 38.8974 ]]]],
   "polygons": [[[-77.0364, 38.8974], [-77.0362, 38.8974], [-77.0362, 38.8972]]],
   "meters_per_pixel": 0.11,
   "area_m2": 128.4,
@@ -206,7 +210,7 @@ The older `POST /v1/analyze` route accepts an address or centre coordinate and r
 ```text
 Frontend polygon: [[longitude, latitude], ...]
         |
-        +--> Mapbox tile bounds at fixed inference zoom 20
+        +--> provider tile bounds at fixed inference zoom 20
         |
         +--> download every 256x256 satellite tile in the bounds
         |
@@ -216,12 +220,12 @@ Frontend polygon: [[longitude, latitude], ...]
         |
         +--> oriented box corners + centre -> tile pixels -> geographic coordinates
         |
-        +--> polygon filter -> two-metre confidence deduplication
+        +--> polygon filter -> 2.5-metre centre deduplication
         |
         `--> spots[] returned to frontend as yellow map points
 ```
 
-The important distinction is that the API does not send one large satellite image to YOLO. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections from the overlap are merged by geographic distance.
+The important distinction is that the API does not send one large satellite image to YOLO in tiled mode. It downloads the complete source-tile rectangle, then scans that rectangle through overlapping windows. A 2x2 window is 512x512 source pixels. It is enlarged before inference so a stall does not become too small just because the selected property is large. Neighboring windows share one tile, which gives detections near a window edge a second chance. Repeated detections are merged by geographic centre distance. The frontend renders only `spots[].coordinates` as dots; OBB corners remain in the API response for downstream consumers but are not drawn by the current UI.
 
 `parking_modal_app.py` is a separate serverless GPU deployment for the Hugging Face oriented-object-detection model `otmanheddouch/yolov8n-obb-09-25-2026`. It receives the user-drawn areas as GeoJSON-order polygon rings (`[longitude, latitude]`), downloads every source tile covering those rings at fixed inference zoom 20, and processes overlapping 2-by-2 tile windows one at a time. Each window is upscaled to the requested inference size (1280px by default), then each OBB's centre and four rotated corners are converted back to geographic coordinates. This preserves stall orientation and detail for large areas and reduces misses at tile borders. Only detections whose centres lie inside a submitted polygon are returned. Overlap duplicates are removed by keeping the highest-confidence centre within two metres. The API also supports `processing_mode: "whole"` as a comparison mode: it downloads the complete tile mosaic and runs one OBB inference over that image.
 
@@ -263,7 +267,7 @@ Request fields:
 | `confidence` | `0.25` | YOLO confidence threshold |
 | `max_tiles` | `400` | Maximum source tiles downloaded for one request |
 | `imgsz` | `1280` | Inference image size after window upscaling |
-| `duplicate_distance_meters` | `2.0` | Radius used to merge overlap detections |
+| `duplicate_distance_meters` | `2.5` | Radius used to merge nearby detections |
 
 Response fields:
 
@@ -296,9 +300,18 @@ Frontend -> Parking:  { polygons: [inputPolygon] }
 
 SAM3 returns `polygons[]`, where each item is a detected geographic object contour. Parking returns `spots[]`, where each item contains a centre `coordinates` pair. The browser passes those coordinates directly to MapLibre GeoJSON sources; it does not convert them to screen pixels. Pixel conversion exists only inside the backend while matching model outputs to satellite tiles.
 
-The frontend maintains three independent visual layers: the cyan user input polygon, purple SAM3 object polygons, and yellow parking-stall centre points. Each can be hidden without deleting data. Input vertices and each SAM3 contour can be dragged, and the sidebar reports input area, SAM3 object area, and stall count separately.
+The frontend maintains independent layers for cyan input areas, purple YOLO masks, red correction regions, and yellow parking-stall centre points. Each can be hidden without deleting data. Input vertices and mask contours can be edited, and the erase brush subtracts from the displayed mask and sidebar area locally.
 
 ## Deployment notes
+
+## Current behavior and known limitations
+
+- Model inference always uses fixed zoom 20. The browser zoom changes only map presentation.
+- The rectangular debug image can include imagery outside the user polygon because source tiles are rectangular; masks and backend area calculations are clipped to the selected polygon.
+- A cold Modal request can take substantially longer than local inference because it may start a GPU container, load two Hugging Face checkpoints, create a Google tile session, download source tiles, stitch the mosaic, and run YOLO. Whole-image mode is especially expensive for large polygons.
+- The semantic checkpoint is expected to expose YOLO `results.masks.data`; if it returns a different tensor layout, the API may report zero masks and the checkpoint output should be inspected before changing the frontend.
+- Browser erase-brush corrections are local refinements. They persist in project `localStorage`, update the displayed mask area, and are not sent back to the model for retraining or re-inference.
+- The reported area is an approximate geographic/Web Mercator calculation, not survey-grade measurement.
 
 - Inject `HF_TOKEN`, `MAPBOX_TOKEN`, and (when using Google) `GOOGLE_MAPS_API_KEY` using the hosting platform's secrets facility; never bake them into an image or source file.
 - Run one application worker per GPU. The model is deliberately initialized once per worker, not per request.
