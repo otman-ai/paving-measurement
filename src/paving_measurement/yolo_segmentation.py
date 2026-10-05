@@ -39,14 +39,16 @@ class YoloSegmentationDetector:
         self.confidence = confidence
 
     @staticmethod
-    def load_huggingface_model(model_id: str, token: str | None) -> "YoloSegmentationDetector":
+    def load_huggingface_model(
+        model_id: str, token: str | None, filename: str = "best.pt"
+    ) -> "YoloSegmentationDetector":
         from huggingface_hub import hf_hub_download
         from ultralytics import YOLO
 
         # The trained repository contains ``best.pt``. Download that exact
         # file instead of scanning the shared cache, which can also contain
         # the previous SAM3 ``sam3.pt`` checkpoint.
-        checkpoint = hf_hub_download(repo_id=model_id, filename="best.pt", token=token)
+        checkpoint = hf_hub_download(repo_id=model_id, filename=filename, token=token)
         LOGGER.info("Loading YOLO segmentation checkpoint %s", checkpoint)
         return YoloSegmentationDetector(YOLO(checkpoint), model_id)
 

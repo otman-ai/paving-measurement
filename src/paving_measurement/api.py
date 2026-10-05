@@ -30,6 +30,7 @@ from paving_measurement.yolo_segmentation import YoloSegmentationDetector
 
 SEGMENTATION_INFERENCE_ZOOM = 20
 SEGMENTATION_MODEL_ID = "otmanheddouch/yolo26n-seg"
+SEMANTIC_SEGMENTATION_FILENAME = "sem-yolo.pt"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -42,6 +43,7 @@ class AnalyzeRequest(BaseModel):
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
+    segmentation_mode: Literal["instance", "semantic"] = "instance"
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -63,6 +65,7 @@ class AnalyzePolygonRequest(BaseModel):
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
+    segmentation_mode: Literal["instance", "semantic"] = "instance"
     processing_mode: Literal["whole", "chunked"] = Field(
         default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
     )
@@ -88,6 +91,7 @@ class Services:
     satellite_client: Any
     google_satellite_client: Any | None
     segmenter: YoloSegmentationDetector
+    semantic_segmenter: YoloSegmentationDetector
 
 
 def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
@@ -254,6 +258,9 @@ def create_api() -> FastAPI:
                 segmenter=YoloSegmentationDetector.load_huggingface_model(
                     SEGMENTATION_MODEL_ID, configured_settings.hf_token
                 ),
+                semantic_segmenter=YoloSegmentationDetector.load_huggingface_model(
+                    SEGMENTATION_MODEL_ID, configured_settings.hf_token, SEMANTIC_SEGMENTATION_FILENAME
+                ),
             )
         except Exception:
             LOGGER.exception("Failed to load YOLO segmentation model %s", configured_settings.model_id)
@@ -367,7 +374,8 @@ def create_api() -> FastAPI:
                 )
                 if return_debug_image:
                     debug_images.append(_as_data_url(mosaic.image, "JPEG"))
-                geometries = services.segmenter.predict_geometries(mosaic.image)
+                segmenter = services.semantic_segmenter if request.segmentation_mode == "semantic" else services.segmenter
+                geometries = segmenter.predict_geometries(mosaic.image)
                 mask_counts.append(len(geometries))
                 input_dimensions.append([mosaic.image.width, mosaic.image.height])
                 if return_debug_image:
@@ -469,6 +477,7 @@ def create_api() -> FastAPI:
             return {
                 "zoom": SEGMENTATION_INFERENCE_ZOOM,
                 "imagery_provider": request.imagery_provider or services.settings.satellite_provider,
+                "segmentation_mode": request.segmentation_mode,
                 "tile_count": tile_count,
                 "chunk_count": len(chunks),
                 "processing_mode": processing_mode,
