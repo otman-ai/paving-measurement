@@ -375,7 +375,10 @@ def create_api() -> FastAPI:
                 if return_debug_image:
                     debug_images.append(_as_data_url(mosaic.image, "JPEG"))
                 segmenter = services.semantic_segmenter if request.segmentation_mode == "semantic" else services.segmenter
-                geometries = segmenter.predict_geometries(mosaic.image)
+                geometries = segmenter.predict_geometries(
+                    mosaic.image,
+                    confidence=0.0 if request.segmentation_mode == "semantic" else None,
+                )
                 mask_counts.append(len(geometries))
                 input_dimensions.append([mosaic.image.width, mosaic.image.height])
                 if return_debug_image:
