@@ -34,6 +34,7 @@ image = (
         "requests>=2.31",
         "huggingface_hub>=0.26",
         "ultralytics>=8.3",
+        "rfdetr>=1.6",
     )
     .add_local_dir("src", remote_path="/root/src", copy=True)
     .env({

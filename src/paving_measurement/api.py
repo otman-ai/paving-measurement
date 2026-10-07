@@ -27,10 +27,13 @@ from paving_measurement.satellite import (
     get_satellite_mosaic_for_tile_bounds,
 )
 from paving_measurement.yolo_segmentation import YoloSegmentationDetector
+from paving_measurement.rfdetr_segmentation import RfDetrSegmentationDetector
 
 SEGMENTATION_INFERENCE_ZOOM = 20
 SEGMENTATION_MODEL_ID = "otmanheddouch/yolo26n-seg"
 SEMANTIC_SEGMENTATION_FILENAME = "sem-yolo.pt"
+RFDETR_MODEL_ID = "otmanheddouch/yolo26n-seg"
+RFDETR_SEGMENTATION_FILENAME = "rfdetr_best_total.pth"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -43,7 +46,7 @@ class AnalyzeRequest(BaseModel):
     zoom: int | None = None
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
-    segmentation_mode: Literal["instance", "semantic", "union"] = "instance"
+    segmentation_mode: Literal["instance", "semantic", "rfdetr", "union"] = "instance"
 
     @model_validator(mode="after")
     def has_location(self) -> "AnalyzeRequest":
@@ -65,7 +68,7 @@ class AnalyzePolygonRequest(BaseModel):
     zoom: int | None = Field(default=None, description="Deprecated; segmentation always uses fixed inference zoom 20.")
     prompt: str | None = Field(default=None, examples=["asphalt pavement, parking lot"])
     imagery_provider: Literal["mapbox", "google"] | None = None
-    segmentation_mode: Literal["instance", "semantic", "union"] = "instance"
+    segmentation_mode: Literal["instance", "semantic", "rfdetr", "union"] = "instance"
     processing_mode: Literal["whole", "chunked"] = Field(
         default="whole", description="Run one full-mosaic inference or overlapping whole-image chunks."
     )
@@ -92,6 +95,7 @@ class Services:
     google_satellite_client: Any | None
     segmenter: YoloSegmentationDetector
     semantic_segmenter: YoloSegmentationDetector
+    rfdetr_segmenter: RfDetrSegmentationDetector
 
 
 def _geographic_polygon_area_m2(polygon: list[list[float]]) -> float:
@@ -261,6 +265,9 @@ def create_api() -> FastAPI:
                 semantic_segmenter=YoloSegmentationDetector.load_huggingface_model(
                     SEGMENTATION_MODEL_ID, configured_settings.hf_token, SEMANTIC_SEGMENTATION_FILENAME
                 ),
+                rfdetr_segmenter=RfDetrSegmentationDetector.load_huggingface_model(
+                    RFDETR_MODEL_ID, configured_settings.hf_token, RFDETR_SEGMENTATION_FILENAME
+                ),
             )
         except Exception:
             LOGGER.exception("Failed to load YOLO segmentation model %s", configured_settings.model_id)
@@ -376,11 +383,13 @@ def create_api() -> FastAPI:
                     debug_images.append(_as_data_url(mosaic.image, "JPEG"))
                 if request.segmentation_mode == "semantic":
                     segmenters = [(services.semantic_segmenter, 0.0)]
+                elif request.segmentation_mode == "rfdetr":
+                    segmenters = [(services.rfdetr_segmenter, 0.5)]
                 elif request.segmentation_mode == "union":
                     # Run both checkpoints on the exact same mosaic. The
                     # shared-mask deduplication below makes this a unified
                     # result: either model can fill a missed region.
-                    segmenters = [(services.segmenter, None), (services.semantic_segmenter, 0.0)]
+                    segmenters = [(services.segmenter, None), (services.semantic_segmenter, 0.0), (services.rfdetr_segmenter, 0.5)]
                 else:
                     segmenters = [(services.segmenter, None)]
                 geometries = []

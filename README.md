@@ -1,6 +1,6 @@
 # Paving Measurement
 
-A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes selectable YOLO26 instance/semantic segmentation and an independent YOLO oriented parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
+A pavement-analysis service with a local Gradio interface and FastAPI deployment targets. It includes selectable YOLO26 instance/semantic segmentation, RF-DETR segmentation, unified multi-model masks, and an independent YOLO oriented parking-stall API. The map frontend sends geographic polygons in GeoJSON order (`[longitude, latitude]`) to both services.
 
 The reported area is a Web Mercator approximation. It is useful for exploratory analysis and should not be used as a survey-grade measurement.
 
@@ -129,7 +129,7 @@ For a CPU-only deployment, replace the `Dockerfile` base image with an appropria
 
 ## Modal deployment with FastAPI
 
-`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses a T4 GPU, loads both `best.pt` (instance masks) and `sem-yolo.pt` (semantic parking-area masks) once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. The legacy `prompt` field is accepted for request compatibility.
+`modal_app.py` deploys a FastAPI service instead of the Gradio interface. It uses a T4 GPU, loads `best.pt`, `sem-yolo.pt`, and `rfdetr_best_total.pth` once per running container, and persists Hugging Face model files in a Modal Volume to reduce subsequent cold-start downloads. The legacy `prompt` field is accepted for request compatibility.
 
 Install and authenticate the Modal CLI:
 
@@ -162,7 +162,7 @@ curl --location --request POST "$MODAL_API_URL/v1/analyze" \
 
 `POST /v1/satellite` returns the satellite mosaic and coordinates without model inference. `POST /v1/analyze` returns the satellite mosaic, final mask overlay, grid comparison, editable polygon coordinates, ground resolution, measurement summary, and per-grid results. Images are returned as base64 data URLs to keep the API self-contained.
 
-`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves tiles from the selected Mapbox or Google provider, runs fixed inference zoom 20, and returns geographic mask contours. Set `segmentation_mode` to `instance` (default) or `semantic`; semantic mode uses `sem-yolo.pt` and returns parking-area masks. The default `processing_mode: "whole"` stitches the complete selected tile rectangle into one image. The map's visual zoom is not used for model quality.
+`POST /v1/analyze-polygon` accepts a user-drawn GeoJSON-order polygon ring (`[longitude, latitude]`) instead of an address. It retrieves tiles from the selected Mapbox or Google provider, runs fixed inference zoom 20, and returns geographic mask contours. Set `segmentation_mode` to `instance` (default), `semantic`, `rfdetr`, or `union`; RF-DETR uses `rfdetr_best_total.pth`, while `union` runs all three models on the same mosaic and deduplicates their masks. The default `processing_mode: "whole"` stitches the complete selected tile rectangle into one image. The map's visual zoom is not used for model quality.
 
 The frontend erase brush is deliberately browser-only. It subtracts brush strokes from the returned mask geometry and recalculates the displayed area locally; brush coordinates are not sent back to the model API. This allows human correction without rerunning inference.
 
@@ -179,7 +179,7 @@ The map workflow uses `POST /v1/analyze-polygon`:
 }
 ```
 
-The service validates the ring and uses fixed inference zoom 20 regardless of the map's visual zoom. In whole mode it stitches the complete inclusive provider tile rectangle into one image. Instance mode uses `best.pt`; semantic mode uses `sem-yolo.pt` and treats the returned raster masks as parking-area coverage. Ultralytics mask coordinates are scaled to the actual mosaic, clipped to the input polygon, and projected back to `[longitude, latitude]` using the tile origin and fixed zoom.
+The service validates the ring and uses fixed inference zoom 20 regardless of the map's visual zoom. In whole mode it stitches the complete inclusive provider tile rectangle into one image. Instance mode uses `best.pt`; semantic mode uses `sem-yolo.pt` and treats the returned raster masks as parking-area coverage; RF-DETR converts its boolean `detections.mask` arrays into the same polygon format. Ultralytics and RF-DETR masks are scaled to the actual mosaic, clipped to the input polygon, and projected back to `[longitude, latitude]` using the tile origin and fixed zoom.
 
 Only contours with points inside the submitted polygon are returned. `area_m2` and `area_ft2` are calculated from those returned geographic contours, so the number represents detected objects inside the input region rather than the entire downloaded imagery. The frontend uses `polygons` for purple editable overlays and calculates the separate input-region area in the browser. `tile_count` is the total source-tile count and `chunk_count` reports the number of whole-image YOLO passes.
 
@@ -309,7 +309,7 @@ The frontend maintains independent layers for cyan input areas, purple YOLO mask
 - Model inference always uses fixed zoom 20. The browser zoom changes only map presentation.
 - The rectangular debug image can include imagery outside the user polygon because source tiles are rectangular; masks and backend area calculations are clipped to the selected polygon.
 - A cold Modal request can take substantially longer than local inference because it may start a GPU container, load two Hugging Face checkpoints, create a Google tile session, download source tiles, stitch the mosaic, and run YOLO. Whole-image mode is especially expensive for large polygons.
-- The semantic checkpoint is expected to expose YOLO `results.masks.data`; if it returns a different tensor layout, the API may report zero masks and the checkpoint output should be inspected before changing the frontend.
+- The semantic checkpoint is expected to expose `results.semantic_mask.data`; RF-DETR is expected to expose boolean `detections.mask` arrays. If either checkpoint changes its output shape, inspect the model result before changing the frontend.
 - Browser erase-brush corrections are local refinements. They persist in project `localStorage`, update the displayed mask area, and are not sent back to the model for retraining or re-inference.
 - The reported area is an approximate geographic/Web Mercator calculation, not survey-grade measurement.
 
