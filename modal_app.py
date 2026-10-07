@@ -34,7 +34,10 @@ image = (
         "requests>=2.31",
         "huggingface_hub>=0.26",
         "ultralytics>=8.3",
-        "rfdetr>=1.6",
+        # RF-DETR 1.6+ requires Transformers 5 and a newer torch API than
+        # the service's pinned Torch 2.5.1.  1.5.2 supports RFDETRSegNano
+        # while remaining compatible with this CUDA/Torch image.
+        "rfdetr==1.5.2",
     )
     .add_local_dir("src", remote_path="/root/src", copy=True)
     .env({
